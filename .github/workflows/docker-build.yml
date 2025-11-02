@@ -27,5 +27,5 @@ jobs:
       with:
         context: .
         push: true
-        tags: ${{ secrets.DOCKERHUB_USERNAME }}/telegram-finance-bot:latest
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/tron-energy-rental:latest
         platforms: linux/amd64,linux/arm64
