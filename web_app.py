@@ -355,7 +355,8 @@ def api_rollback():
         for i, record in enumerate(records):
             if record.get("message_id") == message_id:
                 removed_record = records.pop(i)
-                group_data["disbursed_usdt"] -= removed_record["usdt"]
+                # 下发记录存储为负数，所以需要减去绝对值来正确减少总额
+                group_data["disbursed_usdt"] -= abs(removed_record["usdt"])
                 removed = True
                 break
     
@@ -375,5 +376,8 @@ def health():
 # ========== 运行 ==========
 
 if __name__ == "__main__":
-    port = int(os.getenv("WEB_PORT", "5000"))
+    # ClawCloud使用PORT环境变量，本地开发使用WEB_PORT
+    # 优先使用PORT（ClawCloud），如果不存在则使用WEB_PORT（本地）
+    port = int(os.getenv("PORT", os.getenv("WEB_PORT", "5000")))
+    print(f"🌐 Web应用启动在端口: {port}")
     app.run(host="0.0.0.0", port=port, debug=False)

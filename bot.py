@@ -313,7 +313,7 @@ def render_group_summary(chat_id: int) -> str:
                 raw = r.get('raw', 0)
                 fx = r.get('fx', fout)
                 rate = r.get('rate', rout)
-                usdt = trunc2(r['usdt'])
+                usdt = round2(r['usdt'])  # 出金使用四舍五入
                 rate_percent = int(rate * 100)
                 rate_sup = to_superscript(rate_percent)
                 lines.append(f"{r['ts']} {raw}  {rate_sup}/ {fx} = {usdt}")
@@ -324,7 +324,7 @@ def render_group_summary(chat_id: int) -> str:
     if send_out:
         lines.append(f"已下发 ({len(send_out)}笔)")
         for r in send_out[:5]:
-            usdt = trunc2(abs(r['usdt']))  # 使用绝对值，避免负数
+            usdt = round2(abs(r['usdt']))  # 下发使用四舍五入
             lines.append(f"{r['ts']} {usdt}")
         lines.append("")
     
@@ -377,7 +377,7 @@ def render_full_summary(chat_id: int) -> str:
                 raw = r.get('raw', 0)
                 fx = r.get('fx', fout)
                 rate = r.get('rate', rout)
-                usdt = trunc2(r['usdt'])
+                usdt = round2(r['usdt'])  # 出金使用四舍五入
                 rate_percent = int(rate * 100)
                 rate_sup = to_superscript(rate_percent)
                 lines.append(f"{r['ts']} {raw}  {rate_sup}/ {fx} = {usdt}")
@@ -388,7 +388,7 @@ def render_full_summary(chat_id: int) -> str:
     if send_out:
         lines.append(f"已下发 ({len(send_out)}笔)")
         for r in send_out:
-            usdt = trunc2(abs(r['usdt']))
+            usdt = round2(abs(r['usdt']))  # 下发使用四舍五入
             lines.append(f"{r['ts']} {usdt}")
         lines.append("")
     

@@ -21,8 +21,7 @@ RUN chmod +x start.sh
 # 暴露端口
 EXPOSE 10000 5000
 
-# 设置环境变量
-ENV PORT=10000
+# 设置环境变量（WEB_PORT供本地开发使用，ClawCloud会覆盖PORT）
 ENV WEB_PORT=5000
 
 # 运行启动脚本（同时启动Bot和Web应用）

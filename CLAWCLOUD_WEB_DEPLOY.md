@@ -58,8 +58,13 @@ a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456
 ### 4. 配置网络
 
 **Network**：
-- **Container Port**: `5000` ⚠️ **重要：必须是5000（Web端口）**
+- **Container Port**: `5000` ⚠️ **重要：必须是5000（Web应用端口）**
 - **Public Access**: ✅ **必须开启**
+
+**📌 说明**：
+- ClawCloud会自动将Container Port设置为环境变量`PORT`
+- Web应用会监听`PORT`环境变量指定的端口
+- Bot的健康检查运行在内部端口10000（无需公开）
 
 ### 5. 配置环境变量
 
