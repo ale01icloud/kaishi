@@ -61,6 +61,11 @@ Or update the workflow configuration to run your preferred script.
     - 自动重算：清除后自动重新计算应下发和已下发金额
     - 统计反馈：显示清除的笔数和USDT金额
     - 日志记录：所有清除操作记录到日志文件
+  - **修复ClawCloud部署端口冲突**：
+    - 问题：bot.py的HTTP健康检查服务器与web_app.py争用同一端口
+    - 修复：移除bot.py中的HTTP服务器（Web应用已提供/health端点）
+    - 改进start.sh：添加自动重启机制和详细日志
+    - 结果：容器现在可以正常启动，Web查账功能可用
 - 2025-11-02:
   - **Web查账系统上线**（完整版）:
     - Flask Web应用提供可视化查账界面
