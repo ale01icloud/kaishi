@@ -3,7 +3,6 @@ import os, re, threading, json, math, datetime, hmac, hashlib
 from datetime import timedelta
 from pathlib import Path
 from dotenv import load_dotenv
-from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
 # ========== 加载环境 ==========
@@ -1338,25 +1337,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 无效操作不回复
 
-# ========== HTTP健康检查服务器 ==========
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    """简单的HTTP服务器，用于Render健康检查和UptimeRobot保活"""
-    
-    def do_GET(self):
-        """处理GET请求"""
-        if self.path in ["/", "/health"]:
-            self.send_response(200)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers()
-            self.wfile.write(b"OK")
-        else:
-            self.send_response(404)
-            self.end_headers()
-    
-    def log_message(self, format, *args):
-        """禁用默认的访问日志（减少输出）"""
-        pass
-
 # ========== 初始化函数 ==========
 def init_bot():
     """初始化Bot - Polling模式"""
@@ -1371,18 +1351,6 @@ def init_bot():
     print("✅ Bot Token 已加载")
     print(f"📊 数据目录: {DATA_DIR}")
     print(f"👑 超级管理员: {OWNER_ID or '未设置'}")
-    
-    # 启动HTTP健康检查服务器（后台线程）
-    port = int(os.getenv("PORT", "10000"))
-    print(f"\n🌐 启动HTTP健康检查服务器（端口 {port}）...")
-    
-    def run_http_server():
-        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-        print(f"✅ HTTP服务器已启动: http://0.0.0.0:{port}")
-        server.serve_forever()
-    
-    http_thread = threading.Thread(target=run_http_server, daemon=True)
-    http_thread.start()
     
     print("\n🤖 配置 Telegram Bot (Polling模式)...")
     from telegram.ext import ApplicationBuilder
