@@ -41,6 +41,11 @@ Or update the workflow configuration to run your preferred script.
 
 ## Recent Changes
 - 2025-11-05:
+  - **修复精度计算问题**：
+    - 入金（已入账）：使用截断到小数点后两位（trunc2），不四舍五入
+    - 出金（已出账）：使用四舍五入到小数点后两位（round2）
+    - 解决了多笔交易累加时的小数位误差问题
+    - 确保显示的金额与实际存储的金额完全一致
   - **改进撤销功能**：
     - 修复：撤销失败的问题（原依赖不可靠的文本匹配）
     - 新实现：基于message_id的精确撤销

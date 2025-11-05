@@ -144,9 +144,14 @@ def remove_admin(user_id: int) -> bool:
 
 # ========== 工具函数 ==========
 def trunc2(x: float) -> float:
+    """截断到小数点后两位（用于入金计算）"""
     # 先四舍五入到6位小数消除浮点误差，再截断到2位小数
     rounded = round(x, 6)
     return math.floor(rounded * 100.0) / 100.0
+
+def round2(x: float) -> float:
+    """四舍五入到小数点后两位（用于出金计算）"""
+    return round(x, 2)
 
 def fmt_usdt(x: float) -> str:
     return f"{x:.2f} USDT"
@@ -778,7 +783,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     country = found_record.get("country", "")
                     
                     # 反向操作：减少已下发
-                    state["summary"]["sent_usdt"] = trunc2(state["summary"]["sent_usdt"] - usdt_amt)
+                    state["summary"]["sent_usdt"] = round2(state["summary"]["sent_usdt"] - usdt_amt)
                     
                     # 从记录中移除
                     state["recent"]["out"] = [r for r in state["recent"]["out"] if r.get("msg_id") != replied_msg_id]
@@ -1087,14 +1092,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state["recent"]["out"] = new_out
         
         # 重新计算汇总数据
-        # 应下发 = 剩余入金USDT总和
-        # 已下发 = 剩余出金USDT总和 + 剩余下发USDT总和
+        # 应下发 = 剩余入金USDT总和（使用截断）
+        # 已下发 = 剩余出金USDT总和 + 剩余下发USDT总和（使用四舍五入）
         total_in_usdt = sum(r.get('usdt', 0) for r in new_in)
         total_out_usdt = sum(r.get('usdt', 0) for r in new_normal_out)
         total_send_usdt = sum(abs(r.get('usdt', 0)) for r in new_send_out)
         
         state["summary"]["should_send_usdt"] = trunc2(total_in_usdt)
-        state["summary"]["sent_usdt"] = trunc2(total_out_usdt + total_send_usdt)
+        state["summary"]["sent_usdt"] = round2(total_out_usdt + total_send_usdt)
         
         save_group_state(chat_id)
         
@@ -1276,9 +1281,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ 请先设置费率和汇率")
             return
         
-        usdt = trunc2(amt * (1 + p["rate"]) / p["fx"])
+        usdt = round2(amt * (1 + p["rate"]) / p["fx"])
         push_recent(chat_id, "out", {"ts": ts, "raw": amt, "usdt": usdt, "country": country, "fx": p["fx"], "rate": p["rate"]})
-        state["summary"]["sent_usdt"] = trunc2(state["summary"]["sent_usdt"] + usdt)
+        state["summary"]["sent_usdt"] = round2(state["summary"]["sent_usdt"] + usdt)
         save_group_state(chat_id)
         append_log(log_path(chat_id, country, dstr),
                    f"[出金] 时间:{ts} 国家:{country or '通用'} 原始:{amt} 汇率:{p['fx']} 费率:{p['rate']*100:.2f}% 下发:{usdt}")
