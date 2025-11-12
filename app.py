@@ -741,15 +741,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         msg = await send_summary_with_button(update, chat_id, user.id)
         
-        # 更新message_id
+        # 保存message_id用于撤销功能
         if msg and txn_id:
-            from psycopg2.extras import execute_values
-            with db.get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE transactions SET message_id = %s WHERE id = %s",
-                        (msg.message_id, txn_id)
-                    )
+            db.update_transaction_message_id(txn_id, msg.message_id)
         
         return
     
@@ -792,13 +786,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         msg = await send_summary_with_button(update, chat_id, user.id)
         
+        # 保存message_id用于撤销功能
         if msg and txn_id:
-            with db.get_db_connection() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "UPDATE transactions SET message_id = %s WHERE id = %s",
-                        (msg.message_id, txn_id)
-                    )
+            db.update_transaction_message_id(txn_id, msg.message_id)
         
         return
     
@@ -831,13 +821,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             msg = await send_summary_with_button(update, chat_id, user.id)
             
+            # 保存message_id用于撤销功能
             if msg and txn_id:
-                with db.get_db_connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "UPDATE transactions SET message_id = %s WHERE id = %s",
-                            (msg.message_id, txn_id)
-                        )
+                db.update_transaction_message_id(txn_id, msg.message_id)
         
         except ValueError:
             await update.message.reply_text("❌ 格式错误，请输入有效的数字\n例如：下发35.04 或 下发-35.04")

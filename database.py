@@ -208,6 +208,15 @@ def get_today_transactions(chat_id: int) -> List[Dict]:
             )
             return [dict(row) for row in cur.fetchall()]
 
+def update_transaction_message_id(transaction_id: int, message_id: int):
+    """更新交易记录的message_id"""
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE transactions SET message_id = %s WHERE id = %s",
+                (message_id, transaction_id)
+            )
+
 def delete_transaction_by_message_id(message_id: int) -> Optional[Dict]:
     """通过message_id删除交易（用于撤销功能）"""
     with get_db_connection() as conn:
