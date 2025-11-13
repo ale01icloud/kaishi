@@ -65,14 +65,24 @@ telegram_app = None
 
 # ========== 工具函数 ==========
 
-def trunc2(x: float) -> float:
-    """截断到小数点后两位（用于入金计算）"""
+def trunc2(x) -> float:
+    """截断到小数点后两位（用于入金计算），兼容 float / Decimal"""
+    if isinstance(x, Decimal):
+        x = float(x)
+    else:
+        x = float(x)
     rounded = round(x, 6)
     return math.floor(rounded * 100.0) / 100.0
 
-def round2(x: float) -> float:
-    """四舍五入到小数点后两位（用于出金计算）"""
+
+def round2(x) -> float:
+    """四舍五入到小数点后两位（用于出金 / 下发计算），兼容 float / Decimal"""
+    if isinstance(x, Decimal):
+        x = float(x)
+    else:
+        x = float(x)
     return round(x, 2)
+
 
 def fmt_usdt(x: float) -> str:
     return f"{x:.2f} USDT"
@@ -719,7 +729,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ 请先设置费率和汇率")
             return
         
-        usdt = trunc2(amt * (1 - rate) / fx)
+        amt_f = float(amt)
+rate_f = float(rate)
+fx_f = float(fx)
+
+usdt = trunc2(amt_f * (1 - rate_f) / fx_f)
+
+
         
         txn_id = db.add_transaction(
             chat_id=chat_id,
