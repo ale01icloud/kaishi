@@ -717,38 +717,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if amt is None:
             return
         
-        if amt == 0:
-            await send_summary_with_button(update, chat_id, user.id)
-            return
-        
-        config = db.get_group_config(chat_id)
-        rate = config.get('in_rate', 0)
-        fx = config.get('in_fx', 0)
-        
         if fx == 0:
-            await update.message.reply_text("⚠️ 请先设置费率和汇率")
-            return
-        
-        amt_f = float(amt)
+    await update.message.reply_text("⚠️ 请先设置费率和汇率")
+    return
+
+# 数字全部转换为 float 用于计算
+amt_f = float(amt)
 rate_f = float(rate)
 fx_f = float(fx)
 
+# 计算 USDT
 usdt = trunc2(amt_f * (1 - rate_f) / fx_f)
 
-
-        
-        txn_id = db.add_transaction(
-            chat_id=chat_id,
-            transaction_type='in',
-            amount=Decimal(str(amt)),
-            rate=Decimal(str(rate)),
-            fx=Decimal(str(fx)),
-            usdt=Decimal(str(usdt)),
-            timestamp=ts,
-            country=country,
-            operator_id=user.id,
-            operator_name=user.first_name
-        )
+# 写入数据库
+txn_id = db.add_transaction(
+    chat_id=chat_id,
+    transaction_type='in',
+    amount=Decimal(str(amt)),
+    rate=Decimal(str(rate)),
+    fx=Decimal(str(fx)),
+    usdt=Decimal(str(usdt)),
+    timestamp=ts,
+    country=country,
+    operator_id=user.id,
+    operator_name=user.first_name
+)
         
         append_log(
             log_path(chat_id, country, dstr),
