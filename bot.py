@@ -16,7 +16,13 @@ if not SESSION_SECRET:
     print("⚠️  警告：SESSION_SECRET未设置，Web查账按钮将不可用")
     print("   如需使用Web查账功能，请设置：export SESSION_SECRET=$(openssl rand -hex 32)")
     SESSION_SECRET = None  # 标记为未配置
-WEB_BASE_URL = os.getenv("WEB_BASE_URL", "http://localhost:5000")  # Web应用的基础URL
+
+# Web应用的基础URL：优先 WEB_BASE_URL，其次 WEBHOOK_URL，最后才是 localhost
+WEB_BASE_URL = (
+    os.getenv("WEB_BASE_URL")
+    or os.getenv("WEBHOOK_URL")
+    or "http://localhost:5000"
+)
 
 # ========== 记账核心状态（多群组支持）==========
 DATA_DIR = Path("./data")
