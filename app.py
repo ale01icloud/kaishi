@@ -237,6 +237,15 @@ def compute_today_summary(chat_id: int):
     """
     txns = db.get_today_transactions(chat_id)
 
+    # ✅ 按时间倒序排序：最新记录在最前面
+    def _ts_key(t):
+        # 优先用 created_at（datetime），没有就用 timestamp 字符串
+        created = t.get("created_at")
+        if created is not None:
+            return created
+        return t.get("timestamp", "")
+    txns = sorted(txns, key=_ts_key, reverse=True)
+
     in_records = []
     out_records = []
     send_records = []
