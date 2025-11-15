@@ -16,11 +16,12 @@ logger = logging.getLogger(__name__)
 @contextmanager
 def get_db_connection():
     """获取数据库连接的上下文管理器"""
-    DATABASE_URL = os.environ.get('DATABASE_URL')
+    DATABASE_URL = os.environ.get("DATABASE_URL")
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL environment variable must be set")
 
     from urllib.parse import urlparse
+
     result = urlparse(DATABASE_URL)
 
     conn = None
@@ -31,7 +32,7 @@ def get_db_connection():
             user=result.username,
             password=result.password,
             database=result.path[1:],
-            cursor_factory=RealDictCursor
+            cursor_factory=RealDictCursor,
         )
         yield conn
         conn.commit()
@@ -46,8 +47,8 @@ def get_db_connection():
 
 
 def init_database():
-    """初始化数据库表结构"""
-    with open('database_schema.sql', 'r', encoding='utf-8') as f:
+    """初始化数据库表结构，并清理旧数据"""
+    with open("database_schema.sql", "r", encoding="utf-8") as f:
         schema_sql = f.read()
 
     with get_db_connection() as conn:
@@ -56,36 +57,45 @@ def init_database():
 
     logger.info("✅ Database initialized successfully")
 
+    # 启动时顺便清理一次 30 天前的旧交易记录
+    try:
+        cleanup_old_transactions(retention_days=30)
+    except Exception as e:
+        # 清理失败不影响主流程
+        logger.error(f"清理旧交易记录失败: {e}")
 
-# ==================== 历史数据清理（只保留最近 N 天） ====================
 
-def delete_old_transactions(retention_days: int = 30):
+# ==================== 只保留最近 N 天交易记录 ====================
+
+def cleanup_old_transactions(retention_days: int = 30):
     """
-    删除 retention_days 天以前的交易记录，默认只保留最近 30 天
-
-    注意：只根据 transactions.created_at 字段判断时间
+    清理 retention_days 天之前的交易记录，默认保留最近 30 天
     """
     if retention_days <= 0:
-        # 防止配置错误导致全部删光
         logger.warning(
-            f"⚠️ delete_old_transactions 被调用但 retention_days={retention_days}，已忽略。"
+            f"忽略清理旧交易记录，retention_days={retention_days} <= 0"
         )
         return
 
     with get_db_connection() as conn:
         with conn.cursor() as cur:
+            # Postgres 中不能直接用 %s 放在 INTERVAL 里面，所以用字符串拼接后再转成 interval
             cur.execute(
                 """
                 DELETE FROM transactions
-                WHERE created_at < NOW() - (%s || ' days')::interval
+                WHERE created_at < (NOW() - (%s || ' days')::interval)
                 """,
                 (retention_days,),
             )
+            deleted = cur.rowcount or 0
 
-    logger.info(f"🧹 已删除 {retention_days} 天之前的交易记录，只保留最近 {retention_days} 天的数据")
+    logger.info(
+        f"🧹 已删除 {deleted} 条 {retention_days} 天之前的交易记录，只保留最近 {retention_days} 天的数据"
+    )
 
 
 # ==================== 群组配置相关 ====================
+
 
 def get_group_config(chat_id: int) -> Dict:
     """获取群组配置"""
@@ -93,16 +103,18 @@ def get_group_config(chat_id: int) -> Dict:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT * FROM groups WHERE chat_id = %s",
-                (chat_id,)
+                (chat_id,),
             )
             result = cur.fetchone()
 
             if not result:
                 # 创建新群组（默认值为0）
                 cur.execute(
-                    """INSERT INTO groups (chat_id, in_rate, in_fx, out_rate, out_fx)
-                       VALUES (%s, 0, 0, 0, 0) RETURNING *""",
-                    (chat_id,)
+                    """
+                    INSERT INTO groups (chat_id, in_rate, in_fx, out_rate, out_fx)
+                    VALUES (%s, 0, 0, 0, 0) RETURNING *
+                    """,
+                    (chat_id,),
                 )
                 result = cur.fetchone()
                 conn.commit()
@@ -113,12 +125,17 @@ def get_group_config(chat_id: int) -> Dict:
 def update_group_config(chat_id: int, **kwargs):
     """更新群组配置"""
     allowed_fields = [
-        'in_rate', 'in_fx', 'out_rate', 'out_fx',
-        'in_fx_source', 'out_fx_source', 'group_name'
+        "in_rate",
+        "in_fx",
+        "out_rate",
+        "out_fx",
+        "in_fx_source",
+        "out_fx_source",
+        "group_name",
     ]
 
     updates = []
-    values = []
+    values: List = []
 
     for field, value in kwargs.items():
         if field in allowed_fields:
@@ -138,13 +155,14 @@ def update_group_config(chat_id: int, **kwargs):
 
 # ==================== 国家配置相关 ====================
 
+
 def get_country_config(chat_id: int, country: str) -> Optional[Dict]:
     """获取指定国家的配置"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT * FROM group_country_configs WHERE chat_id = %s AND country = %s",
-                (chat_id, country)
+                (chat_id, country),
             )
             result = cur.fetchone()
             return dict(result) if result else None
@@ -156,23 +174,25 @@ def set_country_config(
     in_rate=None,
     in_fx=None,
     out_rate=None,
-    out_fx=None
+    out_fx=None,
 ):
     """设置指定国家的配置"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO group_country_configs 
-                   (chat_id, country, in_rate, in_fx, out_rate, out_fx)
-                   VALUES (%s, %s, %s, %s, %s, %s)
-                   ON CONFLICT (chat_id, country) 
-                   DO UPDATE SET 
-                       in_rate = COALESCE(EXCLUDED.in_rate, group_country_configs.in_rate),
-                       in_fx = COALESCE(EXCLUDED.in_fx, group_country_configs.in_fx),
-                       out_rate = COALESCE(EXCLUDED.out_rate, group_country_configs.out_rate),
-                       out_fx = COALESCE(EXCLUDED.out_fx, group_country_configs.out_fx),
-                       updated_at = CURRENT_TIMESTAMP""",
-                (chat_id, country, in_rate, in_fx, out_rate, out_fx)
+                """
+                INSERT INTO group_country_configs 
+                    (chat_id, country, in_rate, in_fx, out_rate, out_fx)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (chat_id, country) 
+                DO UPDATE SET 
+                    in_rate = COALESCE(EXCLUDED.in_rate, group_country_configs.in_rate),
+                    in_fx = COALESCE(EXCLUDED.in_fx, group_country_configs.in_fx),
+                    out_rate = COALESCE(EXCLUDED.out_rate, group_country_configs.out_rate),
+                    out_fx = COALESCE(EXCLUDED.out_fx, group_country_configs.out_fx),
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                (chat_id, country, in_rate, in_fx, out_rate, out_fx),
             )
 
 
@@ -182,7 +202,7 @@ def get_all_country_configs(chat_id: int) -> List[Dict]:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT * FROM group_country_configs WHERE chat_id = %s ORDER BY country",
-                (chat_id,)
+                (chat_id,),
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -193,11 +213,12 @@ def delete_country_config(chat_id: int, country: str):
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM group_country_configs WHERE chat_id = %s AND country = %s",
-                (chat_id, country)
+                (chat_id, country),
             )
 
 
 # ==================== 交易记录相关 ====================
+
 
 def add_transaction(
     chat_id: int,
@@ -207,27 +228,38 @@ def add_transaction(
     fx: Decimal,
     usdt: Decimal,
     timestamp: str,
-    country: str = '通用',
+    country: str = "通用",
     message_id: Optional[int] = None,
     operator_id: Optional[int] = None,
-    operator_name: Optional[str] = None
+    operator_name: Optional[str] = None,
 ) -> int:
     """添加交易记录，返回transaction ID"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO transactions 
-                   (chat_id, transaction_type, amount, rate, fx, usdt, country, 
-                    timestamp, message_id, operator_id, operator_name)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                   RETURNING id""",
+                """
+                INSERT INTO transactions 
+                    (chat_id, transaction_type, amount, rate, fx, usdt, country, 
+                     timestamp, message_id, operator_id, operator_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
                 (
-                    chat_id, transaction_type, amount, rate, fx, usdt, country,
-                    timestamp, message_id, operator_id, operator_name
-                )
+                    chat_id,
+                    transaction_type,
+                    amount,
+                    rate,
+                    fx,
+                    usdt,
+                    country,
+                    timestamp,
+                    message_id,
+                    operator_id,
+                    operator_name,
+                ),
             )
             result = cur.fetchone()
-            return result['id'] if result else None
+            return result["id"] if result else None
 
 
 def get_recent_transactions(chat_id: int, limit: int = 50) -> List[Dict]:
@@ -235,11 +267,13 @@ def get_recent_transactions(chat_id: int, limit: int = 50) -> List[Dict]:
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """SELECT * FROM transactions 
-                   WHERE chat_id = %s 
-                   ORDER BY created_at DESC 
-                   LIMIT %s""",
-                (chat_id, limit)
+                """
+                SELECT * FROM transactions 
+                WHERE chat_id = %s 
+                ORDER BY created_at DESC 
+                LIMIT %s
+                """,
+                (chat_id, limit),
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -251,11 +285,13 @@ def get_today_transactions(chat_id: int) -> List[Dict]:
             # 使用created_at字段，数据库存储的是UTC时间
             # 需要转换为北京时间（UTC+8）后判断日期
             cur.execute(
-                """SELECT * FROM transactions 
-                   WHERE chat_id = %s 
-                   AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = CURRENT_DATE
-                   ORDER BY created_at ASC""",
-                (chat_id,)
+                """
+                SELECT * FROM transactions 
+                WHERE chat_id = %s 
+                AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = CURRENT_DATE
+                ORDER BY created_at ASC
+                """,
+                (chat_id,),
             )
             return [dict(row) for row in cur.fetchall()]
 
@@ -266,7 +302,7 @@ def update_transaction_message_id(transaction_id: int, message_id: int):
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE transactions SET message_id = %s WHERE id = %s",
-                (message_id, transaction_id)
+                (message_id, transaction_id),
             )
 
 
@@ -277,7 +313,7 @@ def delete_transaction_by_message_id(message_id: int) -> Optional[Dict]:
             # 先查询要删除的记录
             cur.execute(
                 "SELECT * FROM transactions WHERE message_id = %s",
-                (message_id,)
+                (message_id,),
             )
             record = cur.fetchone()
 
@@ -285,7 +321,7 @@ def delete_transaction_by_message_id(message_id: int) -> Optional[Dict]:
                 # 删除记录
                 cur.execute(
                     "DELETE FROM transactions WHERE message_id = %s",
-                    (message_id,)
+                    (message_id,),
                 )
                 return dict(record)
 
@@ -298,30 +334,34 @@ def clear_today_transactions(chat_id: int) -> Dict:
         with conn.cursor() as cur:
             # 统计要删除的记录
             cur.execute(
-                """SELECT 
-                       transaction_type,
-                       COUNT(*) as count,
-                       SUM(usdt) as total_usdt
-                   FROM transactions 
-                   WHERE chat_id = %s 
-                   AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = CURRENT_DATE
-                   GROUP BY transaction_type""",
-                (chat_id,)
+                """
+                SELECT 
+                    transaction_type,
+                    COUNT(*) AS count,
+                    SUM(usdt) AS total_usdt
+                FROM transactions 
+                WHERE chat_id = %s 
+                AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = CURRENT_DATE
+                GROUP BY transaction_type
+                """,
+                (chat_id,),
             )
             stats = {
-                row['transaction_type']: {
-                    'count': row['count'],
-                    'usdt': float(row['total_usdt'] or 0)
+                row["transaction_type"]: {
+                    "count": row["count"],
+                    "usdt": float(row["total_usdt"] or 0),
                 }
                 for row in cur.fetchall()
             }
 
             # 删除今日记录
             cur.execute(
-                """DELETE FROM transactions 
-                   WHERE chat_id = %s 
-                   AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = CURRENT_DATE""",
-                (chat_id,)
+                """
+                DELETE FROM transactions 
+                WHERE chat_id = %s 
+                AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = CURRENT_DATE
+                """,
+                (chat_id,),
             )
 
             return stats
@@ -331,41 +371,56 @@ def get_transactions_summary(chat_id: int) -> Dict:
     """获取交易汇总统计"""
     today_txns = get_today_transactions(chat_id)
 
-    in_usdt = sum(t['usdt'] for t in today_txns if t['transaction_type'] == 'in')
-    out_usdt = sum(t['usdt'] for t in today_txns if t['transaction_type'] == 'out')
-    send_usdt = sum(t['usdt'] for t in today_txns if t['transaction_type'] == 'send')
+    in_usdt = sum(
+        t["usdt"] for t in today_txns if t["transaction_type"] == "in"
+    )
+    out_usdt = sum(
+        t["usdt"] for t in today_txns if t["transaction_type"] == "out"
+    )
+    send_usdt = sum(
+        t["usdt"] for t in today_txns if t["transaction_type"] == "send"
+    )
 
     return {
-        'in_usdt': float(in_usdt),
-        'out_usdt': float(out_usdt),
-        'send_usdt': float(send_usdt),
-        'should_send': float(in_usdt - out_usdt),
-        'unsent': float(in_usdt - out_usdt - send_usdt),
-        'in_records': [t for t in today_txns if t['transaction_type'] == 'in'],
-        'out_records': [t for t in today_txns if t['transaction_type'] == 'out'],
-        'send_records': [t for t in today_txns if t['transaction_type'] == 'send'],
+        "in_usdt": float(in_usdt),
+        "out_usdt": float(out_usdt),
+        "send_usdt": float(send_usdt),
+        "should_send": float(in_usdt - out_usdt),
+        "unsent": float(in_usdt - out_usdt - send_usdt),
+        "in_records": [
+            t for t in today_txns if t["transaction_type"] == "in"
+        ],
+        "out_records": [
+            t for t in today_txns if t["transaction_type"] == "out"
+        ],
+        "send_records": [
+            t for t in today_txns if t["transaction_type"] == "send"
+        ],
     }
 
 
 # ==================== 管理员相关 ====================
 
+
 def add_admin(
     user_id: int,
     username: str = None,
     first_name: str = None,
-    is_owner: bool = False
+    is_owner: bool = False,
 ):
     """添加管理员"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO admins (user_id, username, first_name, is_owner)
-                   VALUES (%s, %s, %s, %s)
-                   ON CONFLICT (user_id) DO UPDATE 
-                   SET username = EXCLUDED.username, 
-                       first_name = EXCLUDED.first_name,
-                       is_owner = EXCLUDED.is_owner""",
-                (user_id, username, first_name, is_owner)
+                """
+                INSERT INTO admins (user_id, username, first_name, is_owner)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE 
+                SET username = EXCLUDED.username, 
+                    first_name = EXCLUDED.first_name,
+                    is_owner = EXCLUDED.is_owner
+                """,
+                (user_id, username, first_name, is_owner),
             )
 
 
@@ -375,7 +430,7 @@ def remove_admin(user_id: int):
         with conn.cursor() as cur:
             cur.execute(
                 "DELETE FROM admins WHERE user_id = %s AND is_owner = FALSE",
-                (user_id,)
+                (user_id,),
             )
 
 
@@ -397,18 +452,23 @@ def is_admin(user_id: int) -> bool:
 
 # ==================== 私聊用户相关 ====================
 
-def add_private_chat_user(user_id: int, username: str = None, first_name: str = None):
+
+def add_private_chat_user(
+    user_id: int, username: str = None, first_name: str = None
+):
     """记录私聊用户"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO private_chat_users (user_id, username, first_name)
-                   VALUES (%s, %s, %s)
-                   ON CONFLICT (user_id) DO UPDATE 
-                   SET username = EXCLUDED.username, 
-                       first_name = EXCLUDED.first_name,
-                       last_message_at = CURRENT_TIMESTAMP""",
-                (user_id, username, first_name)
+                """
+                INSERT INTO private_chat_users (user_id, username, first_name)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id) DO UPDATE 
+                SET username = EXCLUDED.username, 
+                    first_name = EXCLUDED.first_name,
+                    last_message_at = CURRENT_TIMESTAMP
+                """,
+                (user_id, username, first_name),
             )
 
 
