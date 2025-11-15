@@ -730,6 +730,49 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
+# ========== Telegram Application 线程 ==========
+
+
+def run_bot_loop():
+    """在独立线程中运行 Telegram Application，并设置 Webhook"""
+    global telegram_app, bot_loop
+
+    bot_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(bot_loop)
+
+    telegram_app = Application.builder().token(BOT_TOKEN).build()
+
+    # 注册指令 / 文本处理
+    telegram_app.add_handler(CommandHandler("start", cmd_start))
+    # 只要是文本或带 caption 的消息都交给 handle_text（非命令）
+    telegram_app.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+            handle_text,
+        )
+    )
+
+    async def _init():
+        # 初始化 Application
+        await telegram_app.initialize()
+
+        if WEBHOOK_URL:
+            webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
+            logger.info(f"🔗 设置 Webhook: {webhook_url}")
+            await telegram_app.bot.set_webhook(webhook_url)
+            logger.info("✅ Webhook 已设置")
+        else:
+            logger.warning("⚠️ 未设置 WEBHOOK_URL，Webhook 不会生效")
+
+        # 启动 Application（不使用 run_webhook，因为 Flask 来处理 HTTP）
+        await telegram_app.start()
+        logger.info("✅ Telegram Bot 初始化完成")
+
+    # 在事件循环中执行初始化，然后保持循环运行，处理来自 Flask webhook 的更新
+    bot_loop.run_until_complete(_init())
+    bot_loop.run_forever()
+
+
 # ========== Flask 路由 ==========
 
 
@@ -922,14 +965,6 @@ def init_app():
     logger.info("🔄 启动 Bot 事件循环线程...")
     t = threading.Thread(target=run_bot_loop, daemon=True)
     t.start()
-
-    # 4. 如果设置了 WEBHOOK_URL，则配置 Telegram Webhook
-    if WEBHOOK_URL:
-        logger.info("🤖 初始化 Telegram Bot Application...")
-        # 注意：run_bot_loop 里已经创建了 Application 并设置 webhook，
-        # 这里只是打印一下提示信息，方便查日志。
-    else:
-        logger.warning("⚠️ 未设置 WEBHOOK_URL，Webhook 不会生效，Bot 无法接收消息")
 
 
 # ========= 程序入口 =========
