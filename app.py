@@ -17,7 +17,6 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import wraps
-from typing import Optional
 
 from dotenv import load_dotenv
 from flask import (
@@ -36,6 +35,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.error import TimedOut
 
 import database as db
 
@@ -72,8 +72,8 @@ LOG_DIR = DATA_DIR / "logs"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-telegram_app: Optional[Application] = None
-bot_loop: Optional[asyncio.AbstractEventLoop] = None
+telegram_app: Application | None = None
+bot_loop: asyncio.AbstractEventLoop | None = None
 
 # ========== 工具函数 ==========
 
@@ -147,65 +147,41 @@ def append_log(path: Path, text: str):
         f.write(text.strip() + "\n")
 
 
-# ======= 新版：金额 + 国家解析（支持 1万 / 1.5亿 等） =======
-
 def parse_amount_and_country(text: str):
     """
-    解析金额 + 国家
-    支持以下格式：
-        +10000
-        +1万
-        +1.5万
-        +2亿
-        +1.2万 / 日本
-        -5000 / 韩国
+    解析 +10000 / 日本、+1万 / 日本、+3千、+3k 等形式
+    返回: (amount, country)
     """
-
     raw = text.strip()
+    if not raw or raw[0] not in "+-":
+        return None, None
 
-    # 先处理开头的 + 或 -
-    m = re.match(r"^([\+\-])\s*(.+)$", raw)
+    body = raw[1:].strip()
+    country = "通用"
+
+    if "/" in body:
+        amount_part, country_part = body.split("/", 1)
+        amount_part = amount_part.strip()
+        country = (country_part or "").strip() or "通用"
+    else:
+        amount_part = body
+
+    # 支持：数字 + 可选单位 [万、千、百、k、K]
+    m = re.match(r'^([0-9]+(?:\.[0-9]+)?)([万千百kK]?)$', amount_part)
     if not m:
         return None, None
 
-    sign = 1 if m.group(1) == "+" else -1
-    body = m.group(2).strip()
+    num = float(m.group(1))
+    unit = m.group(2)
 
-    # 判断是否有国家
-    if "/" in body:
-        num_part, country = map(str.strip, body.rsplit("/", 1))
-    else:
-        num_part, country = body, "通用"
+    if unit == "万":
+        num *= 10000
+    elif unit in ("千", "k", "K"):
+        num *= 1000
+    elif unit == "百":
+        num *= 100
 
-    # 中文单位换算
-    def convert_cn_amount(s: str) -> Optional[float]:
-        """
-        将 “1万”“2.5万”“3亿”“1200” 转成 float
-        """
-        # 去掉逗号，如 1,200,000
-        s = s.replace(",", "")
-
-        unit = 1
-        if s.endswith("千"):
-            unit = 1000
-            s = s[:-1]
-        elif s.endswith("万"):
-            unit = 10000
-            s = s[:-1]
-        elif s.endswith("亿"):
-            unit = 100000000
-            s = s[:-1]
-
-        try:
-            return float(s) * unit
-        except Exception:
-            return None
-
-    amount = convert_cn_amount(num_part)
-    if amount is None:
-        return None, None
-
-    return sign * amount, country
+    return num, country
 
 
 def is_bot_admin(user_id: int) -> bool:
@@ -414,6 +390,22 @@ def render_full_summary(chat_id: int) -> str:
     return "\n".join(lines)
 
 
+async def safe_reply_text(message, text: str, **kwargs):
+    """
+    安全回复：如果第一次发送超时，等待 1 秒再重试一次
+    """
+    try:
+        return await message.reply_text(text, **kwargs)
+    except TimedOut:
+        logger.warning("发送消息超时，准备重试一次 ...")
+        try:
+            await asyncio.sleep(1)
+            return await message.reply_text(text, **kwargs)
+        except TimedOut:
+            logger.error("重试发送消息仍然超时，放弃本次发送")
+            return None
+
+
 async def send_summary_with_button(update: Update, chat_id: int, user_id: int):
     text = render_group_summary(chat_id)
 
@@ -425,9 +417,9 @@ async def send_summary_with_button(update: Update, chat_id: int, user_id: int):
         )
 
     if markup:
-        msg = await update.message.reply_text(text, reply_markup=markup)
+        msg = await safe_reply_text(update.message, text, reply_markup=markup)
     else:
-        msg = await update.message.reply_text(text)
+        msg = await safe_reply_text(update.message, text)
 
     return msg
 
@@ -781,54 +773,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# ========== 构建 Telegram Application & 事件循环 ==========
-
-
-def build_telegram_app() -> Application:
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(
-        MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text)
-    )
-    return application
-
-
-def run_bot_loop():
-    """在单独线程中启动 Telegram Application（Webhook 模式）"""
-    global telegram_app, bot_loop
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    bot_loop = loop
-
-    application = build_telegram_app()
-    telegram_app = application
-
-    async def _init():
-        logger.info("🤖 初始化 Telegram Bot Application...")
-        await application.initialize()
-
-        # 先删除旧 webhook，防止冲突
-        try:
-            await application.bot.delete_webhook(drop_pending_updates=True)
-        except Exception as e:
-            logger.warning(f"删除旧 Webhook 失败: {e}")
-
-        if WEBHOOK_URL:
-            webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
-            logger.info(f"🔗 设置 Webhook: {webhook_url}")
-            await application.bot.set_webhook(webhook_url)
-            logger.info("✅ Webhook 已设置")
-        else:
-            logger.warning("⚠️ 未设置 WEBHOOK_URL，Webhook 不会生效，Bot 无法接收消息")
-
-        await application.start()
-        logger.info("✅ Telegram Bot 初始化完成")
-
-    loop.run_until_complete(_init())
-    loop.run_forever()
-
-
 # ========== Flask 路由 ==========
 
 
@@ -986,7 +930,55 @@ def api_rollback():
     return jsonify({"success": False, "error": "未找到该交易记录"}), 404
 
 
+# ========= Telegram Application 构建 & 事件循环 =========
+
+
+def build_telegram_application() -> Application:
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", cmd_start))
+    application.add_handler(
+        MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text)
+    )
+    return application
+
+
+def run_bot_loop():
+    """
+    在单独的线程里启动一个 asyncio 事件循环，
+    初始化 Telegram Application，并保持常驻。
+    """
+    global telegram_app, bot_loop
+
+    loop = asyncio.new_event_loop()
+    bot_loop = loop
+    asyncio.set_event_loop(loop)
+
+    async def main():
+        global telegram_app
+
+        application = build_telegram_application()
+        telegram_app = application
+
+        if WEBHOOK_URL:
+            webhook_full = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
+            logger.info(f"🔗 设置 Webhook: {webhook_full}")
+            await application.bot.set_webhook(webhook_full)
+            logger.info("✅ Webhook 已设置")
+        else:
+            logger.warning("⚠️ 未设置 WEBHOOK_URL，Webhook 不会生效，Bot 无法接收消息")
+
+        await application.initialize()
+        await application.start()
+        logger.info("✅ Telegram Bot 初始化完成")
+
+        # 阻塞：保持事件循环一直运行
+        await asyncio.Event().wait()
+
+    loop.run_until_complete(main())
+
+
 # ========= 应用初始化函数 =========
+
 
 def init_app():
     """初始化数据库、管理员、Webhook 等"""
@@ -994,13 +986,13 @@ def init_app():
     logger.info("🚀 启动 Telegram Bot + Web Dashboard")
     logger.info("=" * 50)
 
-    # 打印环境变量概况，方便排查
+    # 环境变量打印一下，方便排查
     logger.info("📋 环境变量检查：")
     logger.info(f"   PORT={PORT}")
     logger.info(f"   DATABASE_URL={'已设置' if os.getenv('DATABASE_URL') else '未设置'}")
-    logger.info("   TELEGRAM_BOT_TOKEN=已设置")
-    logger.info(f"   OWNER_ID={OWNER_ID}")
-    logger.info(f"   WEBHOOK_URL={WEBHOOK_URL}")
+    logger.info(f"   TELEGRAM_BOT_TOKEN={'已设置' if BOT_TOKEN else '未设置'}")
+    logger.info(f"   OWNER_ID={OWNER_ID or '未设置'}")
+    logger.info(f"   WEBHOOK_URL={WEBHOOK_URL or '未设置'}")
     logger.info(f"   SESSION_SECRET={'已设置' if SESSION_SECRET else '未设置'}")
 
     # 1. 初始化数据库
