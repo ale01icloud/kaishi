@@ -8,9 +8,11 @@ from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
 from decimal import Decimal
 from typing import Dict, List, Optional
+from datetime import datetime, timedelta
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 @contextmanager
 def get_db_connection():
@@ -18,10 +20,10 @@ def get_db_connection():
     DATABASE_URL = os.environ.get('DATABASE_URL')
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL environment variable must be set")
-    
+
     from urllib.parse import urlparse
     result = urlparse(DATABASE_URL)
-    
+
     conn = None
     try:
         conn = psycopg2.connect(
@@ -48,12 +50,29 @@ def init_database():
     """初始化数据库表结构"""
     with open('database_schema.sql', 'r', encoding='utf-8') as f:
         schema_sql = f.read()
-    
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(schema_sql)
-    
+
     logger.info("✅ Database initialized successfully")
+
+
+def cleanup_old_transactions(keep_days: int = 30):
+    """
+    清理 N 天之前的交易记录（按 created_at 字段判断）
+    keep_days: 只保留最近 keep_days 天的数据
+    """
+    cutoff = datetime.utcnow() - timedelta(days=keep_days)
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM transactions WHERE created_at < %s RETURNING id",
+                (cutoff,)
+            )
+            deleted_rows = cur.fetchall()
+            count = len(deleted_rows)
+    logger.info(f"🧹 已删除 {count} 条 {keep_days} 天之前的交易记录，只保留最近 {keep_days} 天的数据")
 
 
 # ==================== 群组配置相关 ====================
@@ -67,7 +86,7 @@ def get_group_config(chat_id: int) -> Dict:
                 (chat_id,)
             )
             result = cur.fetchone()
-            
+
             if not result:
                 # 创建新群组（默认值为0）
                 cur.execute(
@@ -77,35 +96,28 @@ def get_group_config(chat_id: int) -> Dict:
                 )
                 result = cur.fetchone()
                 conn.commit()
-            
+
             return dict(result) if result else {}
 
 
 def update_group_config(chat_id: int, **kwargs):
     """更新群组配置"""
-    allowed_fields = [
-        'in_rate',
-        'in_fx',
-        'out_rate',
-        'out_fx',
-        'in_fx_source',
-        'out_fx_source',
-        'group_name',
-    ]
-    
+    allowed_fields = ['in_rate', 'in_fx', 'out_rate', 'out_fx',
+                      'in_fx_source', 'out_fx_source', 'group_name']
+
     updates = []
     values = []
-    
+
     for field, value in kwargs.items():
         if field in allowed_fields:
             updates.append(f"{field} = %s")
             values.append(value)
-    
+
     if not updates:
         return
-    
+
     values.append(chat_id)
-    
+
     with get_db_connection() as conn:
         with conn.cursor() as cur:
             sql = f"UPDATE groups SET {', '.join(updates)} WHERE chat_id = %s"
@@ -126,14 +138,8 @@ def get_country_config(chat_id: int, country: str) -> Optional[Dict]:
             return dict(result) if result else None
 
 
-def set_country_config(
-    chat_id: int,
-    country: str,
-    in_rate=None,
-    in_fx=None,
-    out_rate=None,
-    out_fx=None
-):
+def set_country_config(chat_id: int, country: str,
+                       in_rate=None, in_fx=None, out_rate=None, out_fx=None):
     """设置指定国家的配置"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -197,19 +203,8 @@ def add_transaction(
                     timestamp, message_id, operator_id, operator_name)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                    RETURNING id""",
-                (
-                    chat_id,
-                    transaction_type,
-                    amount,
-                    rate,
-                    fx,
-                    usdt,
-                    country,
-                    timestamp,
-                    message_id,
-                    operator_id,
-                    operator_name,
-                )
+                (chat_id, transaction_type, amount, rate, fx, usdt, country,
+                 timestamp, message_id, operator_id, operator_name)
             )
             result = cur.fetchone()
             return result['id'] if result else None
@@ -265,7 +260,7 @@ def delete_transaction_by_message_id(message_id: int) -> Optional[Dict]:
                 (message_id,)
             )
             record = cur.fetchone()
-            
+
             if record:
                 # 删除记录
                 cur.execute(
@@ -273,7 +268,7 @@ def delete_transaction_by_message_id(message_id: int) -> Optional[Dict]:
                     (message_id,)
                 )
                 return dict(record)
-            
+
             return None
 
 
@@ -296,11 +291,11 @@ def clear_today_transactions(chat_id: int) -> Dict:
             stats = {
                 row['transaction_type']: {
                     'count': row['count'],
-                    'usdt': float(row['total_usdt'] or 0),
+                    'usdt': float(row['total_usdt'] or 0)
                 }
                 for row in cur.fetchall()
             }
-            
+
             # 删除今日记录
             cur.execute(
                 """DELETE FROM transactions 
@@ -308,18 +303,18 @@ def clear_today_transactions(chat_id: int) -> Dict:
                    AND (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date = CURRENT_DATE""",
                 (chat_id,)
             )
-            
+
             return stats
 
 
 def get_transactions_summary(chat_id: int) -> Dict:
     """获取交易汇总统计"""
     today_txns = get_today_transactions(chat_id)
-    
+
     in_usdt = sum(t['usdt'] for t in today_txns if t['transaction_type'] == 'in')
     out_usdt = sum(t['usdt'] for t in today_txns if t['transaction_type'] == 'out')
     send_usdt = sum(t['usdt'] for t in today_txns if t['transaction_type'] == 'send')
-    
+
     return {
         'in_usdt': float(in_usdt),
         'out_usdt': float(out_usdt),
@@ -328,18 +323,14 @@ def get_transactions_summary(chat_id: int) -> Dict:
         'unsent': float(in_usdt - out_usdt - send_usdt),
         'in_records': [t for t in today_txns if t['transaction_type'] == 'in'],
         'out_records': [t for t in today_txns if t['transaction_type'] == 'out'],
-        'send_records': [t for t in today_txns if t['transaction_type'] == 'send'],
+        'send_records': [t for t in today_txns if t['transaction_type'] == 'send']
     }
 
 
 # ==================== 管理员相关 ====================
 
-def add_admin(
-    user_id: int,
-    username: str = None,
-    first_name: str = None,
-    is_owner: bool = False
-):
+def add_admin(user_id: int, username: str = None,
+              first_name: str = None, is_owner: bool = False):
     """添加管理员"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -382,7 +373,9 @@ def is_admin(user_id: int) -> bool:
 
 # ==================== 私聊用户相关 ====================
 
-def add_private_chat_user(user_id: int, username: str = None, first_name: str = None):
+def add_private_chat_user(user_id: int,
+                          username: str = None,
+                          first_name: str = None):
     """记录私聊用户"""
     with get_db_connection() as conn:
         with conn.cursor() as cur:
@@ -405,36 +398,3 @@ def get_all_private_chat_users() -> List[Dict]:
                 "SELECT * FROM private_chat_users ORDER BY last_message_at DESC"
             )
             return [dict(row) for row in cur.fetchall()]
-
-
-# ==================== 旧记录清理（只保留最近 N 天） ====================
-
-def cleanup_old_transactions(days: int = 30):
-    """
-    清理 N 天之前的交易记录，防止数据库无限增长。
-    默认保留最近 30 天的数据。
-    """
-    from datetime import datetime, timedelta, timezone
-
-    # 数据库存的是 UTC 时间，这里也用 UTC 来计算
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-
-    with get_db_connection() as conn:
-        with conn.cursor() as cur:
-            # 先统计要删除多少条
-            cur.execute(
-                "SELECT COUNT(*) AS cnt FROM transactions WHERE created_at < %s",
-                (cutoff,),
-            )
-            row = cur.fetchone()
-            count = row["cnt"] if row else 0
-
-            # 删除旧记录
-            cur.execute(
-                "DELETE FROM transactions WHERE created_at < %s",
-                (cutoff,),
-            )
-
-    logger.info(
-        f"🧹 已删除 {count} 条 {days} 天之前的交易记录，只保留最近 {days} 天的数据"
-    )
