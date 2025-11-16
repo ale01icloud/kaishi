@@ -8,7 +8,6 @@ import os
 import re
 import hmac
 import math
-import json
 import hashlib
 import logging
 import asyncio
@@ -36,6 +35,7 @@ from telegram.ext import (
     filters,
 )
 
+import pytz
 import database as db
 
 # ========== 环境 & Flask 初始化 ==========
@@ -114,16 +114,12 @@ def to_superscript(num: int) -> str:
 
 def now_ts() -> str:
     """当前北京时间 HH:MM"""
-    import pytz
-
     tz = pytz.timezone("Asia/Shanghai")
     return datetime.now(tz).strftime("%H:%M")
 
 
 def today_str() -> str:
     """当前北京时间 YYYY-MM-DD"""
-    import pytz
-
     tz = pytz.timezone("Asia/Shanghai")
     return datetime.now(tz).strftime("%Y-%m-%d")
 
@@ -381,7 +377,7 @@ async def send_summary_with_button(update: Update, chat_id: int, user_id: int):
     return msg
 
 
-# ========== Telegram 处理 ==========
+# ========== Telegram 指令 & 消息处理 ==========
 
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -420,10 +416,16 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message:
+        return
+
     user = update.effective_user
     chat = update.effective_chat
     chat_id = chat.id
     text = (update.message.text or update.message.caption or "").strip()
+    if not text:
+        return
+
     ts = now_ts()
     dstr = today_str()
 
@@ -447,7 +449,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_summary_with_button(update, chat_id, user.id)
         return
 
-    # 管理员相关命令，从这里开始都需要权限
     # 显示机器人管理员
     if text == "显示机器人管理员":
         if not is_bot_admin(user.id):
@@ -730,47 +731,50 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 
-# ========== Telegram Application 线程 ==========
+# ========== Telegram Application 事件循环 ==========
 
 
 def run_bot_loop():
-    """在独立线程中运行 Telegram Application，并设置 Webhook"""
+    """在独立线程中运行 Telegram Application"""
     global telegram_app, bot_loop
 
     bot_loop = asyncio.new_event_loop()
     asyncio.set_event_loop(bot_loop)
 
-    telegram_app = Application.builder().token(BOT_TOKEN).build()
-
-    # 注册指令 / 文本处理
-    telegram_app.add_handler(CommandHandler("start", cmd_start))
-    # 只要是文本或带 caption 的消息都交给 handle_text（非命令）
-    telegram_app.add_handler(
-        MessageHandler(
-            (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
-            handle_text,
+    async def _init_app():
+        global telegram_app
+        logger.info("🤖 初始化 Telegram Bot Application...")
+        telegram_app = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .build()
         )
-    )
 
-    async def _init():
-        # 初始化 Application
-        await telegram_app.initialize()
+        telegram_app.add_handler(CommandHandler("start", cmd_start))
+        telegram_app.add_handler(MessageHandler(filters.ALL, handle_text))
 
+        # 设置 Webhook
         if WEBHOOK_URL:
             webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
             logger.info(f"🔗 设置 Webhook: {webhook_url}")
-            await telegram_app.bot.set_webhook(webhook_url)
+            await telegram_app.bot.set_webhook(url=webhook_url)
             logger.info("✅ Webhook 已设置")
         else:
-            logger.warning("⚠️ 未设置 WEBHOOK_URL，Webhook 不会生效")
+            logger.warning("⚠️ 未设置 WEBHOOK_URL，Bot 无法通过 Webhook 收到消息")
 
-        # 启动 Application（不使用 run_webhook，因为 Flask 来处理 HTTP）
+        await telegram_app.initialize()
         await telegram_app.start()
         logger.info("✅ Telegram Bot 初始化完成")
 
-    # 在事件循环中执行初始化，然后保持循环运行，处理来自 Flask webhook 的更新
-    bot_loop.run_until_complete(_init())
-    bot_loop.run_forever()
+    try:
+        bot_loop.run_until_complete(_init_app())
+        bot_loop.run_forever()
+    except Exception as e:
+        logger.exception("❌ Telegram Bot 事件循环异常: %s", e)
+    finally:
+        if telegram_app:
+            bot_loop.run_until_complete(telegram_app.stop())
+            bot_loop.run_until_complete(telegram_app.shutdown())
 
 
 # ========== Flask 路由 ==========
@@ -932,11 +936,28 @@ def api_rollback():
 
 # ========= 应用初始化函数 =========
 
+
+def log_env_info():
+    logger.info("📋 环境变量检查：")
+    logger.info(f"   PORT={PORT}")
+    logger.info(
+        f"   DATABASE_URL={'已设置' if os.getenv('DATABASE_URL') else '未设置'}"
+    )
+    logger.info(f"   TELEGRAM_BOT_TOKEN={'已设置' if BOT_TOKEN else '未设置'}")
+    logger.info(f"   OWNER_ID={OWNER_ID or '未设置'}")
+    logger.info(f"   WEBHOOK_URL={WEBHOOK_URL or '未设置'}")
+    logger.info(
+        f"   SESSION_SECRET={'已设置' if SESSION_SECRET else '未设置'}"
+    )
+
+
 def init_app():
     """初始化数据库、管理员、Webhook 等"""
     logger.info("=" * 50)
     logger.info("🚀 启动 Telegram Bot + Web Dashboard")
     logger.info("=" * 50)
+
+    log_env_info()
 
     # 1. 初始化数据库
     try:
