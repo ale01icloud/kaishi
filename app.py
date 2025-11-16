@@ -251,12 +251,45 @@ def generate_web_url(chat_id: int, user_id: int) -> str | None:
     return f"{WEB_BASE_URL.rstrip('/')}/dashboard?token={token}"
 
 
+# ========== 账单统计辅助（“今日汇总”） ==========
+
+
+def get_today_summary(chat_id: int) -> dict:
+    """
+    只统计“今天”的交易，用于群里那条账单汇总。
+    历史数据仍保留，在 render_full_summary 里使用原来的汇总。
+    """
+    txns = db.get_today_transactions(chat_id)
+
+    in_records = [t for t in txns if t["transaction_type"] == "in"]
+    out_records = [t for t in txns if t["transaction_type"] == "out"]
+    send_records = [t for t in txns if t["transaction_type"] == "send"]
+
+    # 应下发 = 入金 USDT 合计 - 出金 USDT 合计
+    should_send = sum(float(t["usdt"]) for t in in_records) - sum(
+        float(t["usdt"]) for t in out_records
+    )
+    # 已下发 USDT
+    send_usdt = sum(float(t["usdt"]) for t in send_records)
+
+    return {
+        "in_records": in_records,
+        "out_records": out_records,
+        "send_records": send_records,
+        "should_send": should_send,
+        "send_usdt": send_usdt,
+    }
+
+
 # ========== 渲染账单文本 ==========
 
 
 def render_group_summary(chat_id: int) -> str:
+    """
+    群里看到的汇总：**只显示“今天”的数据**。
+    """
     config = db.get_group_config(chat_id)
-    summary = db.get_transactions_summary(chat_id)
+    summary = get_today_summary(chat_id)  # ✅ 改成只看今天
 
     bot_name = config.get("group_name") or "AA全球国际支付"
 
@@ -274,7 +307,7 @@ def render_group_summary(chat_id: int) -> str:
     fout = config.get("out_fx", 0)
 
     lines: list[str] = []
-    lines.append(f"📊【{bot_name} 账单汇总】\n")
+    lines.append(f"📊【{bot_name} 今日账单汇总】\n")
 
     # 入金记录（最新在上）
     lines.append(f"已入账 ({len(in_records)}笔)")
@@ -316,16 +349,19 @@ def render_group_summary(chat_id: int) -> str:
     lines.append("━━━━━━━━━━━━━━")
     lines.append(f"⚙️ 当前费率：入 {rin*100:.0f}% ⇄ 出 {rout*100:.0f}%")
     lines.append(f"💱 固定汇率：入 {fin} ⇄ 出 {fout}")
-    lines.append(f"📊 应下发：{fmt_usdt(should)}")
-    lines.append(f"📤 已下发：{fmt_usdt(sent)}")
-    lines.append(f"{'❗' if diff != 0 else '✅'} 未下发：{fmt_usdt(diff)}")
+    lines.append(f"📊 今日应下发：{fmt_usdt(should)}")
+    lines.append(f"📤 今日已下发：{fmt_usdt(sent)}")
+    lines.append(f"{'❗' if diff != 0 else '✅'} 今日未下发：{fmt_usdt(diff)}")
     lines.append("━━━━━━━━━━━━━━")
-    lines.append("📚 **查看更多记录**：发送「更多记录」")
+    lines.append("📚 **查看更多记录（含历史）**：发送「更多记录」")
 
     return "\n".join(lines)
 
 
 def render_full_summary(chat_id: int) -> str:
+    """
+    完整账单：仍然使用数据库里的“所有历史数据”汇总。
+    """
     config = db.get_group_config(chat_id)
     summary = db.get_transactions_summary(chat_id)
 
@@ -576,7 +612,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_summary_with_button(update, chat_id, user.id)
         return
 
-    # 清除数据（今日 00:00 起）
+    # 清除数据（今日 00:00 起）—— 现在只是辅助功能，汇总本身已经按“今天”算
     if text == "清除数据":
         if not is_bot_admin(user.id):
             return
