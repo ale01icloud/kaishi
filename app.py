@@ -8,15 +8,15 @@ import os
 import re
 import hmac
 import math
-import json
-import hashlib
 import logging
 import asyncio
 import threading
+import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 from decimal import Decimal
 from functools import wraps
+from typing import Optional
 
 from dotenv import load_dotenv
 from flask import (
@@ -35,6 +35,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.request import HTTPXRequest
 from telegram.error import TimedOut
 
 import database as db
@@ -72,8 +73,8 @@ LOG_DIR = DATA_DIR / "logs"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-telegram_app: Application | None = None
-bot_loop: asyncio.AbstractEventLoop | None = None
+telegram_app: Optional[Application] = None
+bot_loop: Optional[asyncio.AbstractEventLoop] = None
 
 # ========== 工具函数 ==========
 
@@ -147,41 +148,61 @@ def append_log(path: Path, text: str):
         f.write(text.strip() + "\n")
 
 
+def _parse_chinese_unit(num_str: str) -> float:
+    """
+    支持 “1万”、“2.5万” 这样的写法。
+    如果没有“万”，按普通数字解析。
+    """
+    num_str = num_str.strip()
+    m = re.match(r"^([0-9]+(?:\.[0-9]+)?)(万)?$", num_str)
+    if not m:
+        return float(num_str)
+    value = float(m.group(1))
+    if m.group(2):  # 有 “万”
+        value *= 10000.0
+    return value
+
+
 def parse_amount_and_country(text: str):
     """
-    解析 +10000 / 日本、+1万 / 日本、+3千、+3k 等形式
-    返回: (amount, country)
+    解析 +10000 / 日本、+1万 / 日本 这样的格式。
+    返回 (amount, country)
     """
-    raw = text.strip()
-    if not raw or raw[0] not in "+-":
+    text = text.strip()
+    if not text:
         return None, None
 
-    body = raw[1:].strip()
-    country = "通用"
+    # 先取出 + 或 -
+    sign = 1.0
+    if text[0] == "+":
+        sign = 1.0
+        body = text[1:]
+    elif text[0] == "-":
+        sign = -1.0
+        body = text[1:]
+    else:
+        body = text
 
+    # 拿到 “金额部分” 和 “国家部分”
+    # 例如 "10000 / 日本" 或 "1万/日本"
     if "/" in body:
         amount_part, country_part = body.split("/", 1)
-        amount_part = amount_part.strip()
-        country = (country_part or "").strip() or "通用"
+        country = country_part.strip() or "通用"
     else:
         amount_part = body
+        country = "通用"
 
-    # 支持：数字 + 可选单位 [万、千、百、k、K]
-    m = re.match(r'^([0-9]+(?:\.[0-9]+)?)([万千百kK]?)$', amount_part)
-    if not m:
+    amount_part = amount_part.strip()
+    if not amount_part:
         return None, None
 
-    num = float(m.group(1))
-    unit = m.group(2)
+    try:
+        amount_abs = _parse_chinese_unit(amount_part)
+    except ValueError:
+        return None, None
 
-    if unit == "万":
-        num *= 10000
-    elif unit in ("千", "k", "K"):
-        num *= 1000
-    elif unit == "百":
-        num *= 100
-
-    return num, country
+    amount = sign * amount_abs
+    return amount, country
 
 
 def is_bot_admin(user_id: int) -> bool:
@@ -251,45 +272,12 @@ def generate_web_url(chat_id: int, user_id: int) -> str | None:
     return f"{WEB_BASE_URL.rstrip('/')}/dashboard?token={token}"
 
 
-# ========== 账单统计辅助（“今日汇总”） ==========
-
-
-def get_today_summary(chat_id: int) -> dict:
-    """
-    只统计“今天”的交易，用于群里那条账单汇总。
-    历史数据仍保留，在 render_full_summary 里使用原来的汇总。
-    """
-    txns = db.get_today_transactions(chat_id)
-
-    in_records = [t for t in txns if t["transaction_type"] == "in"]
-    out_records = [t for t in txns if t["transaction_type"] == "out"]
-    send_records = [t for t in txns if t["transaction_type"] == "send"]
-
-    # 应下发 = 入金 USDT 合计 - 出金 USDT 合计
-    should_send = sum(float(t["usdt"]) for t in in_records) - sum(
-        float(t["usdt"]) for t in out_records
-    )
-    # 已下发 USDT
-    send_usdt = sum(float(t["usdt"]) for t in send_records)
-
-    return {
-        "in_records": in_records,
-        "out_records": out_records,
-        "send_records": send_records,
-        "should_send": should_send,
-        "send_usdt": send_usdt,
-    }
-
-
 # ========== 渲染账单文本 ==========
 
 
 def render_group_summary(chat_id: int) -> str:
-    """
-    群里看到的汇总：**只显示“今天”的数据**。
-    """
     config = db.get_group_config(chat_id)
-    summary = get_today_summary(chat_id)  # ✅ 改成只看今天
+    summary = db.get_transactions_summary(chat_id)
 
     bot_name = config.get("group_name") or "AA全球国际支付"
 
@@ -307,7 +295,7 @@ def render_group_summary(chat_id: int) -> str:
     fout = config.get("out_fx", 0)
 
     lines: list[str] = []
-    lines.append(f"📊【{bot_name} 今日账单汇总】\n")
+    lines.append(f"📊【{bot_name} 账单汇总】\n")
 
     # 入金记录（最新在上）
     lines.append(f"已入账 ({len(in_records)}笔)")
@@ -342,6 +330,7 @@ def render_group_summary(chat_id: int) -> str:
         lines.append(f"已下发 ({len(send_records)}笔)")
         for r in reversed(send_records[-5:]):
             usdt = round2(float(r["usdt"]))
+
             ts = r["timestamp"]
             lines.append(f"{ts} {usdt:.2f}")
         lines.append("")
@@ -349,19 +338,16 @@ def render_group_summary(chat_id: int) -> str:
     lines.append("━━━━━━━━━━━━━━")
     lines.append(f"⚙️ 当前费率：入 {rin*100:.0f}% ⇄ 出 {rout*100:.0f}%")
     lines.append(f"💱 固定汇率：入 {fin} ⇄ 出 {fout}")
-    lines.append(f"📊 今日应下发：{fmt_usdt(should)}")
-    lines.append(f"📤 今日已下发：{fmt_usdt(sent)}")
-    lines.append(f"{'❗' if diff != 0 else '✅'} 今日未下发：{fmt_usdt(diff)}")
+    lines.append(f"📊 应下发：{fmt_usdt(should)}")
+    lines.append(f"📤 已下发：{fmt_usdt(sent)}")
+    lines.append(f"{'❗' if diff != 0 else '✅'} 未下发：{fmt_usdt(diff)}")
     lines.append("━━━━━━━━━━━━━━")
-    lines.append("📚 **查看更多记录（含历史）**：发送「更多记录」")
+    lines.append("📚 **查看更多记录**：发送「更多记录」")
 
     return "\n".join(lines)
 
 
 def render_full_summary(chat_id: int) -> str:
-    """
-    完整账单：仍然使用数据库里的“所有历史数据”汇总。
-    """
     config = db.get_group_config(chat_id)
     summary = db.get_transactions_summary(chat_id)
 
@@ -426,20 +412,22 @@ def render_full_summary(chat_id: int) -> str:
     return "\n".join(lines)
 
 
-async def safe_reply_text(message, text: str, **kwargs):
+async def safe_reply(message, text: str, reply_markup=None):
     """
-    安全回复：如果第一次发送超时，等待 1 秒再重试一次
+    给群里回复消息，加一层超时重试的保护。
     """
     try:
-        return await message.reply_text(text, **kwargs)
+        return await message.reply_text(text, reply_markup=reply_markup)
     except TimedOut:
         logger.warning("发送消息超时，准备重试一次 ...")
         try:
-            await asyncio.sleep(1)
-            return await message.reply_text(text, **kwargs)
+            return await message.reply_text(text, reply_markup=reply_markup)
         except TimedOut:
             logger.error("重试发送消息仍然超时，放弃本次发送")
             return None
+    except Exception as e:
+        logger.exception(f"发送消息出现异常: {e}")
+        return None
 
 
 async def send_summary_with_button(update: Update, chat_id: int, user_id: int):
@@ -452,11 +440,7 @@ async def send_summary_with_button(update: Update, chat_id: int, user_id: int):
             [[InlineKeyboardButton("📊 查看账单明细", url=web_url)]]
         )
 
-    if markup:
-        msg = await safe_reply_text(update.message, text, reply_markup=markup)
-    else:
-        msg = await safe_reply_text(update.message, text)
-
+    msg = await safe_reply(update.message, text, reply_markup=markup)
     return msg
 
 
@@ -470,8 +454,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "🤖 你好，我是财务记账机器人。\n\n"
         "📊 记账操作：\n"
-        "  入金：+10000 或 +1万 或 +10000 / 日本\n"
-        "  出金：-10000 或 -1万 或 -10000 / 日本\n"
+        "  入金：+10000 或 +10000 / 日本，或者 +1万 / 日本\n"
+        "  出金：-10000 或 -10000 / 日本，或者 -1万 / 日本\n"
         "  查看账单：+0 或 更多记录\n\n"
         "💰 USDT 下发（仅管理员）：\n"
         "  下发35.04（记录下发并扣除应下发）\n"
@@ -612,7 +596,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_summary_with_button(update, chat_id, user.id)
         return
 
-    # 清除数据（今日 00:00 起）—— 现在只是辅助功能，汇总本身已经按“今天”算
+    # 清除数据（今日 00:00 起）
     if text == "清除数据":
         if not is_bot_admin(user.id):
             return
@@ -726,6 +710,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         amt, country = parse_amount_and_country(text)
         if amt is None or amt == 0:
             return
+        # 入金是 +，出金是 -，这里我们统一用绝对值计算
+        amt = abs(amt)
         config = db.get_group_config(chat_id)
         rate = config.get("out_rate", 0)
         fx = config.get("out_fx", 0)
@@ -966,51 +952,59 @@ def api_rollback():
     return jsonify({"success": False, "error": "未找到该交易记录"}), 404
 
 
-# ========= Telegram Application 构建 & 事件循环 =========
-
-
-def build_telegram_application() -> Application:
-    application = Application.builder().token(BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", cmd_start))
-    application.add_handler(
-        MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text)
-    )
-    return application
+# ========= Bot 事件循环线程 =========
 
 
 def run_bot_loop():
     """
-    在单独的线程里启动一个 asyncio 事件循环，
-    初始化 Telegram Application，并保持常驻。
+    在独立线程中启动 Telegram Application（Webhook 模式）。
+    使用 HTTPXRequest，并把各种超时时间拉长一点，降低偶发超时的概率。
     """
     global telegram_app, bot_loop
 
-    loop = asyncio.new_event_loop()
-    bot_loop = loop
-    asyncio.set_event_loop(loop)
+    logger.info("🤖 初始化 Telegram Bot Application...")
 
-    async def main():
-        global telegram_app
+    request = HTTPXRequest(
+        connect_timeout=15.0,
+        read_timeout=20.0,
+        write_timeout=20.0,
+        pool_timeout=20.0,
+    )
 
-        application = build_telegram_application()
-        telegram_app = application
+    bot_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(bot_loop)
+
+    telegram_app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .request(request)
+        .build()
+    )
+
+    telegram_app.add_handler(CommandHandler("start", cmd_start))
+    telegram_app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
+    )
+
+    async def async_init():
+        me = await telegram_app.bot.get_me()
+        logger.info(f"✅ Bot 已登录：@{me.username} (id={me.id})")
 
         if WEBHOOK_URL:
-            webhook_full = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
-            logger.info(f"🔗 设置 Webhook: {webhook_full}")
-            await application.bot.set_webhook(webhook_full)
+            webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
+            logger.info(f"🔗 设置 Webhook: {webhook_url}")
+            await telegram_app.bot.set_webhook(
+                url=webhook_url,
+                allowed_updates=["message"],
+            )
             logger.info("✅ Webhook 已设置")
-        else:
-            logger.warning("⚠️ 未设置 WEBHOOK_URL，Webhook 不会生效，Bot 无法接收消息")
 
-        await application.initialize()
-        await application.start()
+        await telegram_app.initialize()
+        await telegram_app.start()
         logger.info("✅ Telegram Bot 初始化完成")
 
-        # 阻塞：保持事件循环一直运行
-        await asyncio.Event().wait()
-
-    loop.run_until_complete(main())
+    bot_loop.run_until_complete(async_init())
+    bot_loop.run_forever()
 
 
 # ========= 应用初始化函数 =========
@@ -1022,20 +1016,18 @@ def init_app():
     logger.info("🚀 启动 Telegram Bot + Web Dashboard")
     logger.info("=" * 50)
 
-    # 环境变量打印一下，方便排查
     logger.info("📋 环境变量检查：")
-    logger.info(f"   PORT={PORT}")
-    logger.info(f"   DATABASE_URL={'已设置' if os.getenv('DATABASE_URL') else '未设置'}")
-    logger.info(f"   TELEGRAM_BOT_TOKEN={'已设置' if BOT_TOKEN else '未设置'}")
-    logger.info(f"   OWNER_ID={OWNER_ID or '未设置'}")
-    logger.info(f"   WEBHOOK_URL={WEBHOOK_URL or '未设置'}")
-    logger.info(f"   SESSION_SECRET={'已设置' if SESSION_SECRET else '未设置'}")
+    logger.info("   PORT=%s", PORT)
+    logger.info("   DATABASE_URL=%s", "已设置" if os.getenv("DATABASE_URL") else "未设置")
+    logger.info("   TELEGRAM_BOT_TOKEN=%s", "已设置" if BOT_TOKEN else "未设置")
+    logger.info("   OWNER_ID=%s", OWNER_ID or "未设置")
+    logger.info("   WEBHOOK_URL=%s", WEBHOOK_URL or "未设置")
+    logger.info("   SESSION_SECRET=%s", "已设置" if SESSION_SECRET else "未设置")
 
     # 1. 初始化数据库
     try:
         db.init_database()
-        # ✅ 只保留最近 N 天的交易记录（目前是 30 天）
-        db.cleanup_old_transactions(30)
+        db.cleanup_old_transactions(30)   # ✨ 只保留最近 30 天的数据
         logger.info("✅ 数据库初始化完成")
     except Exception as e:
         logger.exception("❌ 数据库初始化失败: %s", e)
