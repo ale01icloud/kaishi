@@ -11,16 +11,16 @@ class FinanceDB:
     data/
       └── user_<user_id>.json
 
-    文件结构示例：
+    文件示例:
     {
       "user_id": 6851029179,
       "transactions": [
         {
           "id": 1,
-          "date": "2025-11-17",
+          "date": "2025-11-18",
           "time": "21:59",
           "amount": 1000.0,
-          "type": "in",        # "in" / "out"
+          "type": "in",      # "in" / "out"
           "raw": "+1千"
         }
       ]
@@ -34,7 +34,7 @@ class FinanceDB:
     # ---------- 基础 ----------
 
     def init_database(self):
-        """初始化数据目录，如果不存在则创建"""
+        """初始化数据目录"""
         os.makedirs(self.data_dir, exist_ok=True)
 
     def _user_file(self, user_id: int) -> str:
@@ -49,8 +49,8 @@ class FinanceDB:
             try:
                 data = json.load(f)
             except json.JSONDecodeError:
-                # 文件损坏时，保底返回空结构
                 data = {"user_id": user_id, "transactions": []}
+
         if "transactions" not in data:
             data["transactions"] = []
         return data
@@ -76,12 +76,7 @@ class FinanceDB:
         """
         新增一条交易记录
 
-        :param user_id: Telegram user id
-        :param date_str: "YYYY-MM-DD"（北京时间）
-        :param time_str: "HH:MM"（北京时间）
-        :param amount: 绝对金额
         :param t_type: "in" / "out"
-        :param raw_text: 原始文本（+100 / -50 / +1万 等）
         """
         with self._lock:
             data = self._load_user_data(user_id)
@@ -101,14 +96,14 @@ class FinanceDB:
             self._save_user_data(user_id, data)
 
     def get_day_transactions(self, user_id: int, date_str: str) -> List[Dict[str, Any]]:
-        """获取某一天的所有交易记录"""
+        """获取某一天所有交易记录"""
         with self._lock:
             data = self._load_user_data(user_id)
             txs: List[Dict[str, Any]] = data.get("transactions", [])
             return [t for t in txs if t.get("date") == date_str]
 
     def get_day_summary(self, user_id: int, date_str: str) -> Dict[str, float]:
-        """返回当天的入账 / 出账汇总"""
+        """当天入账 / 出账汇总"""
         txs = self.get_day_transactions(user_id, date_str)
         total_in = 0.0
         total_out = 0.0
@@ -117,9 +112,21 @@ class FinanceDB:
                 total_in += float(t.get("amount", 0.0))
             else:
                 total_out += float(t.get("amount", 0.0))
-
         return {
             "total_in": total_in,
             "total_out": total_out,
             "net": total_in - total_out,
         }
+
+
+# ---------- 兼容旧启动脚本：提供 module 级别的 init_database() ----------
+
+_default_db = FinanceDB(data_dir="data")
+
+
+def init_database():
+    """
+    兼容旧脚本里使用 from database import init_database 的调用。
+    只做一件事：确保 data/ 目录存在。
+    """
+    _default_db.init_database()
