@@ -123,7 +123,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "  •  -50    表示出账 50\n"
         "  •  +1千   等于 +1000\n"
         "  •  +1万   等于 +10000\n\n"
-        "发送 “查看账单明细” 可以查看今天的汇总账单。"
+        "发送 “查看账单明细” 可以查看今天的汇总账单。\n"
+        "发送 “清除数据” 或 /clear 可以清空当天 00:00 以来的所有记录。"
     )
     if update.message:
         await update.message.reply_text(text)
@@ -200,6 +201,26 @@ async def cmd_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_today_summary(update, context, user_id)
 
 
+async def cmd_clear_today(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """清空当天记录：从 00:00 到现在的所有记录"""
+    user = update.effective_user
+    chat = update.effective_chat
+    user_id = user.id if user else (chat.id if chat else 0)
+
+    date_str = today_str()
+    deleted = db.clear_day_transactions(user_id, date_str)
+
+    if deleted == 0:
+        msg = f"今天（{date_str}）本来就没有记录，无需清除～"
+    else:
+        msg = f"✅ 已清除今天（{date_str}）从 00:00 至现在的 {deleted} 条记录。"
+
+    if update.message:
+        await update.message.reply_text(msg)
+    elif update.callback_query:
+        await update.callback_query.edit_message_text(msg)
+
+
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     if not query:
@@ -225,6 +246,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = user.id if user else (chat.id if chat else 0)
 
     text = update.message.text.strip()
+
+    # 清除当天数据
+    if text in {"清除数据", "清空数据", "重置数据"}:
+        await cmd_clear_today(update, context)
+        return
 
     # 关键字：查看账单
     keywords = {"查看账单明细", "查看账单", "更多记录", "账单", "账单明细"}
@@ -326,6 +352,8 @@ def start_telegram_bot():
         # 命令
         tg_app.add_handler(CommandHandler("start", cmd_start))
         tg_app.add_handler(CommandHandler("summary", cmd_summary))
+        tg_app.add_handler(CommandHandler("clear", cmd_clear_today))
+        tg_app.add_handler(CommandHandler("reset", cmd_clear_today))
 
         # 文本消息
         tg_app.add_handler(
@@ -335,7 +363,7 @@ def start_telegram_bot():
         # 回调按钮
         tg_app.add_handler(CallbackQueryHandler(handle_callback))
 
-        # 如果你有 WebApp Data，可以这样挂（可保留，不影响）
+        # WebApp Data（可选）
         tg_app.add_handler(
             MessageHandler(filters.StatusUpdate.WEB_APP_DATA, handle_text)
         )
