@@ -3,6 +3,7 @@
 """
 统一 Flask 应用 - Telegram 财务 Bot Webhook + Web Dashboard
 使用 JSON 文件存储账单 & 管理员信息（不再需要 PostgreSQL）
+【当前版本：JSON + 轮询版，不需要公网 HTTPS / Webhook】
 """
 
 import os
@@ -39,7 +40,8 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OWNER_ID = os.getenv("OWNER_ID")
 SESSION_SECRET = os.getenv("SESSION_SECRET")
 WEB_BASE_URL = os.getenv("WEB_BASE_URL", "http://localhost:5000")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # 例如: https://xxx.clawcloudrun.com
+# 轮询版不再使用 WEBHOOK_URL
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not BOT_TOKEN:
     raise RuntimeError("❌ 未配置 TELEGRAM_BOT_TOKEN")
@@ -71,9 +73,8 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 # JSON 数据锁
 _db_lock = threading.Lock()
 
-# 全局 Telegram Application & 事件循环
+# 全局 Telegram Application（轮询版不再需要全局事件循环）
 telegram_app: Application | None = None
-bot_loop: asyncio.AbstractEventLoop | None = None
 
 # ========== JSON “数据库” 工具函数 ==========
 
@@ -1012,26 +1013,8 @@ def health():
     return "OK", 200
 
 
-@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-def webhook():
-    """Telegram Webhook 入口"""
-    global telegram_app, bot_loop
-    try:
-        data = request.get_json(force=True)
-        logger.info(f"[WEBHOOK] 收到更新: {json.dumps(data, ensure_ascii=False)[:200]}...")
-        update = Update.de_json(data, telegram_app.bot)
+# **轮询版不需要 webhook 路由，这里删除 / 注释掉原有 /webhook/<token>**
 
-        if telegram_app and bot_loop:
-            asyncio.run_coroutine_threadsafe(
-                telegram_app.process_update(update), bot_loop
-            )
-        else:
-            logger.error("telegram_app 或 bot_loop 未初始化")
-
-        return "OK", 200
-    except Exception as e:
-        logger.error(f"Webhook 处理异常: {e}")
-        return "Error", 500
 
 # ----- Dashboard -----
 
@@ -1169,12 +1152,16 @@ def api_rollback():
         return jsonify({"success": True, "message": "交易已回退"})
     return jsonify({"success": False, "error": "未找到交易"}), 404
 
-# ========== Bot 初始化 & 事件循环 ==========
+# ========== Bot 初始化 & 事件循环（轮询） ==========
 
-async def setup_telegram_bot():
+async def setup_telegram_bot_polling():
+    """
+    初始化 Telegram Bot，并使用 long polling 接收消息。
+    不需要任何公网 HTTPS / Webhook。
+    """
     global telegram_app
 
-    logger.info("🤖 初始化 Telegram Bot Application (JSON DB)...")
+    logger.info("🤖 初始化 Telegram Bot Application (JSON DB, polling 模式)...")
     telegram_app = Application.builder().token(BOT_TOKEN).build()
 
     telegram_app.add_handler(CommandHandler("start", cmd_start))
@@ -1182,36 +1169,22 @@ async def setup_telegram_bot():
         MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_text)
     )
 
-    await telegram_app.initialize()
-
-    if WEBHOOK_URL:
-        webhook_path = f"{WEBHOOK_URL}/webhook/{BOT_TOKEN}"
-        logger.info(f"🔗 设置 Webhook: {webhook_path}")
-        await telegram_app.bot.set_webhook(url=webhook_path)
-        logger.info("✅ Webhook 已设置")
-    else:
-        logger.warning("⚠️ WEBHOOK_URL 未设置，需要手动配置 Webhook")
-
-    logger.info("✅ Telegram Bot 初始化完成")
+    logger.info("🔄 Bot 开始轮询接收消息 (run_polling)...")
+    await telegram_app.run_polling(allowed_updates=Update.ALL_TYPES)
+    logger.info("🛑 Bot 轮询结束")
 
 
 def run_bot_loop():
-    global bot_loop
-    bot_loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(bot_loop)
-    try:
-        bot_loop.run_until_complete(setup_telegram_bot())
-        bot_loop.run_forever()
-    except Exception as e:
-        logger.error(f"Bot 事件循环错误: {e}")
-    finally:
-        bot_loop.close()
+    """
+    在单独线程中启动 asyncio 事件循环，运行轮询。
+    """
+    asyncio.run(setup_telegram_bot_polling())
 
 # ========== 应用初始化 ==========
 
 def init_app():
     logger.info("=" * 50)
-    logger.info("🚀 启动 Telegram Bot + Web Dashboard (JSON DB)")
+    logger.info("🚀 启动 Telegram Bot + Web Dashboard (JSON DB / polling)")
     logger.info("=" * 50)
 
     init_database()
@@ -1229,13 +1202,9 @@ def init_app():
 if __name__ == "__main__":
     init_app()
 
-    logger.info("🔄 启动 Bot 事件循环线程...")
+    logger.info("🔄 启动 Bot 轮询线程...")
     t = threading.Thread(target=run_bot_loop, daemon=True)
     t.start()
-
-    # 给 Bot 一点时间初始化
-    import time
-    time.sleep(2)
 
     port = int(os.getenv("PORT", "5000"))
     logger.info(f"🌐 Flask 应用启动在端口: {port}")
