@@ -149,7 +149,7 @@ def trunc2(x: float) -> float:
     return math.floor(rounded * 100.0) / 100.0
 
 def round2(x: float) -> float:
-    """四舍五入到两位小数（出金显示用）"""
+    """四舍五入到两位小数（出金显示/计算用）"""
     return round(float(x), 2)
 
 def fmt_usdt(x: float) -> str:
@@ -237,31 +237,35 @@ def resolve_params(chat_id: int, direction: str, country: str|None) -> dict:
 
 def parse_amount_and_country(text: str):
     """
-    解析金额 & 国家，支持：
-      +10000
-      +10000 / 日本
-      +1千 / 日本   -> 1000
-      -2.5万       -> 25000
-    说明：返回金额始终为正数，正负由调用处的 + / - 决定
+    解析金额 + 国家
+    - 支持：+10000 / 日本
+    - 支持：-200 /US
+    - 新增：+1千 / 日本  -> 1000
+           +1万        -> 10000
     """
     s = text.strip()
-    # 符号 数字 可选空格 + 单位(千/万/k/w) 可选 "/ 国家"
-    m = re.match(
-        r'^([+\-])\s*'                  # 符号
-        r'([0-9]+(?:\.[0-9]+)?)\s*'     # 数字
-        r'([千万kKwW]?)'                # 可选单位
-        r'(?:/\s*([^\s]+))?$',          # 可选 / 国家
-        s
-    )
+    m = re.match(r"^([+\-])\s*([0-9]+(?:\.[0-9]+)?)(.*)$", s)
     if not m:
         return None, None
-    sign, num_str, unit, country = m.groups()
+    sign = m.group(1)
+    num_str = m.group(2)
+    tail = m.group(3).strip()
+
     amount = float(num_str)
-    if unit in ("千", "k", "K"):
-        amount *= 1000
-    elif unit in ("万", "w", "W"):
+
+    # 中文单位转换
+    # 只要后面带“万”，认为是 * 10000；带“千”认为 *1000
+    if "万" in tail:
         amount *= 10000
-    # 注意：这里不根据 sign 取负数，+ / - 逻辑由外层判断
+    elif "千" in tail:
+        amount *= 1000
+
+    # 金额对调用方始终返回正数（入金/出金方向通过+/-判断）
+    amount = abs(amount)
+
+    # 提取国家（/ 日本）
+    m2 = re.search(r"/\s*([^\s]+)$", s)
+    country = m2.group(1) if m2 else None
     return amount, country
 
 # ========== 管理员系统 ==========
@@ -307,7 +311,7 @@ def render_group_summary(chat_id: int) -> str:
     
     lines.append("")
     
-    # 出金记录（改为四舍五入）
+    # 出金记录（使用四舍五入）
     lines.append(f"已出账 ({len(normal_out)}笔)")
     if normal_out:
         for r in normal_out[:5]:
@@ -427,8 +431,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "🤖 你好，我是财务记账机器人。\n\n"
                 "📊 记账操作：\n"
-                "  入金：+10000 或 +10000 / 日本\n"
-                "  出金：-10000 或 -10000 / 日本\n"
+                "  入金：+10000 / 日本、+1千、+1万\n"
+                "  出金：-10000 / 日本、-1千、-1万\n"
                 "  查看账单：+0 或 更多记录\n\n"
                 "💰 USDT下发（仅管理员）：\n"
                 "  下发35.04（记录下发并扣除应下发）\n"
@@ -438,7 +442,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "  撤销出金（撤销最近一笔出金）\n"
                 "  撤销下发（撤销最近一笔下发/撤销下发）\n\n"
                 "🧹 清空数据（仅管理员）：\n"
-                "  清除数据 / 清空数据（清空今日所有记录）\n\n"
+                "  清除数据 / 清空数据 / 清空账单（清空今日所有记录）\n\n"
                 "⚙️ 快速设置（仅管理员）：\n"
                 "  重置默认值（一键设置推荐费率/汇率）\n"
                 "  设置入金费率 10\n"
@@ -468,8 +472,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "🤖 你好，我是财务记账机器人。\n\n"
             "📊 记账操作：\n"
-            "  入金：+10000 或 +10000 / 日本\n"
-            "  出金：-10000 或 -10000 / 日本\n"
+            "  入金：+10000 或 +10000 / 日本，也支持 +1千、+1万\n"
+            "  出金：-10000 或 -10000 / 日本，也支持 -1千、-1万\n"
             "  查看账单：+0 或 更多记录\n\n"
             "💰 USDT下发（仅管理员）：\n"
             "  下发35.04（记录下发并扣除应下发）\n"
@@ -477,7 +481,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔄 撤销功能（仅管理员）：\n"
             "  撤销入金 / 撤销出金 / 撤销下发\n\n"
             "🧹 清空数据（仅管理员）：\n"
-            "  清除数据 / 清空数据（清空今日所有记录）\n\n"
+            "  清除数据 / 清空数据 / 清空账单\n\n"
             "⚙️ 快速设置（仅管理员）：\n"
             "  重置默认值\n"
             "  设置入金费率 10\n"
@@ -540,9 +544,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         "⏳ 请耐心等待回复"
                     )
                     return
+                    
                 except Exception as e:
                     print(f"转发私聊消息失败: {e}")
             else:
+                # OWNER 私聊控制面板（广播等）
                 if update.message.reply_to_message:
                     replied_msg_id = update.message.reply_to_message.message_id
                     if 'private_msg_map' in context.bot_data:
@@ -744,7 +750,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         state["defaults"] = {
             "in":  {"rate": 0.10, "fx": 153},
-            "out": {"rate": 0.02, "fx": 137},  # 这里写正 0.02，公式里用 (1 + rate)
+            "out": {"rate": 0.02, "fx": 137},  # 出金费率用正 0.02，公式里 (1 + rate)
         }
         save_group_state(chat_id)
         
@@ -827,7 +833,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # 🧹 清除 / 清空 数据（今天）
-    if text in ("清除数据", "清空数据"):
+    if text in ("清除数据", "清空数据", "清空账单"):
         if not is_admin(user.id):
             return
         in_count = len(state["recent"]["in"])
@@ -915,10 +921,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         usdt = float(last.get("usdt", 0.0))  # 可能是正，也可能是负（下发-35.04）
         # 撤销时反向恢复应下发
         if usdt > 0:
-            # 原来是“下发35.04”：应下发-35.04，现在恢复 +35.04
             state["summary"]["should_send_usdt"] = trunc2(state["summary"]["should_send_usdt"] + usdt)
         else:
-            # 原来是“下发-35.04”：应下发+35.04，现在恢复 -35.04
             state["summary"]["should_send_usdt"] = trunc2(state["summary"]["should_send_usdt"] - abs(usdt))
         save_group_state(chat_id)
         append_log(log_path(chat_id, None, dstr),
@@ -927,7 +931,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(render_group_summary(chat_id))
         return
 
-    # 入金（截断）——已支持 +1千 / +2.5万
+    # 入金（截断）
     if text.startswith("+"):
         if not is_admin(user.id):
             return
@@ -951,7 +955,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(render_group_summary(chat_id))
         return
 
-    # 出金（四舍五入）——已支持 -1千 / -2.5万
+    # 出金（四舍五入）
     if text.startswith("-"):
         if not is_admin(user.id):
             return
