@@ -60,7 +60,7 @@ def get_default_state() -> Dict[str, Any]:
             "in": {"rate": 0.0, "fx": 0.0},
             "out": {"rate": 0.0, "fx": 0.0, "fee_usdt": 0.0},  # 出金手续费（USDT/笔）
         },
-        "countries": {},  # 可扩展国家专属设置（沿用你原来的结构）
+        "countries": {},  # 国家专属设置
         "precision": {"mode": "truncate", "digits": 2},
         "bot_name": "全球海外支付",
         "recent": {"in": [], "out": []},  # out 中包含普通出金 + 下发记录
@@ -86,7 +86,10 @@ def load_group_state(chat_id: int) -> Dict[str, Any]:
             # 兼容老数据补齐字段
             state.setdefault("recent", {"in": [], "out": []})
             state.setdefault("summary", {"should_send_usdt": 0.0, "sent_usdt": 0.0})
-            state.setdefault("defaults", {"in": {"rate": 0.0, "fx": 0.0}, "out": {"rate": 0.0, "fx": 0.0}})
+            state.setdefault(
+                "defaults",
+                {"in": {"rate": 0.0, "fx": 0.0}, "out": {"rate": 0.0, "fx": 0.0}},
+            )
             state.setdefault("countries", {})
             state.setdefault("bot_name", "东启海外支付")
             state.setdefault("last_date", "")
@@ -260,7 +263,7 @@ def push_recent(chat_id: int, kind: str, item: Dict[str, Any]) -> None:
 
 def resolve_params(chat_id: int, direction: str, country: Optional[str]) -> Dict[str, float]:
     """
-    兼容国家专属设置（沿用原逻辑）：
+    兼容国家专属设置：
     - rate / fx 若国家专属没设置，则用 defaults
     """
     state = load_group_state(chat_id)
@@ -319,6 +322,19 @@ def short_peer_name(name: str, n: int = 4) -> str:
     return name[:n]
 
 
+def fmt_percent(rate: float) -> str:
+    """
+    费率显示支持小数：3.5% 就显示 3.5%
+    rate 传入为 0.035
+    """
+    p = rate * 100.0
+    if abs(p - round(p)) < 1e-9:
+        return f"{int(round(p))}%"
+    # 去掉尾部多余 0
+    s = f"{p:.6f}".rstrip("0").rstrip(".")
+    return f"{s}%"
+
+
 # ========== 权限系统 ==========
 def is_super_admin(user_id: int) -> bool:
     """超级管理员判断：仅依赖环境变量"""
@@ -337,6 +353,19 @@ def can_manage_bot_admin(user_id: int) -> bool:
     return is_super_admin(user_id)
 
 
+def resolve_target_user_by_reply(update) -> Optional[Any]:
+    """
+    只允许【回复消息】解析目标用户（稳定）。
+    彻底不支持 @username 方式（Telegram 群聊限制）。
+    """
+    try:
+        if update.message and update.message.reply_to_message and update.message.reply_to_message.from_user:
+            return update.message.reply_to_message.from_user
+    except Exception:
+        pass
+    return None
+
+
 # ========== 汇总渲染 ==========
 def compute_totals(state: Dict[str, Any]) -> Dict[str, Any]:
     rec_in = state.get("recent", {}).get("in", [])
@@ -349,9 +378,9 @@ def compute_totals(state: Dict[str, Any]) -> Dict[str, Any]:
     total_out = trunc2(sum(float(r.get("usdt", 0.0)) for r in normal_out))
     total_send = trunc2(sum(float(r.get("usdt", 0.0)) for r in send_out))
 
-    should = total_in                          # 应下发 = 已入账合计
-    sent = trunc2(total_out + total_send)      # 已下发 = 出账合计 + 下发合计
-    diff = trunc2(should - sent)               # 未下发 = 应下发 - 已下发（可为负）
+    should = total_in
+    sent = trunc2(total_out + total_send)
+    diff = trunc2(should - sent)
 
     return {
         "total_in": total_in,
@@ -385,48 +414,42 @@ def render_group_summary(chat_id: int) -> str:
     fin = float(state["defaults"]["in"]["fx"])
     rout = float(state["defaults"]["out"]["rate"])
     fout = float(state["defaults"]["out"]["fx"])
-    fee_usdt = float(state["defaults"]["out"].get("fee_usdt", 0.0))
 
     lines: List[str] = []
     lines.append(f"【{bot} 账单汇总】\n")
 
-    # 入金（前5条）
     lines.append(f"已入账 ({len(rec_in)}笔)")
     for r in rec_in[:5]:
         raw = r.get("raw", 0)
         fx = r.get("fx", fin)
-        rate = r.get("rate", rin)
+        rate = float(r.get("rate", rin))
         usdt = trunc2(float(r.get("usdt", 0.0)))
-        rate_percent = int(float(rate) * 100)
-        rate_sup = to_superscript(rate_percent)
+        rate_txt = fmt_percent(rate)
         ts = r.get("ts", "")
-        lines.append(f"{ts} {raw}  {rate_sup}/ {fx} = {usdt}{_render_line_peer(r)}")
+        lines.append(f"{ts} {raw}  {rate_txt}/ {fx} = {usdt}{_render_line_peer(r)}")
     lines.append("")
 
-    # 出金（前5条）
     lines.append(f"已出账 ({len(normal_out)}笔)")
     for r in normal_out[:5]:
         raw = r.get("raw", 0)
         fx = r.get("fx", fout)
-        rate = r.get("rate", rout)
+        rate = float(r.get("rate", rout))
         usdt = round2(float(r.get("usdt", 0.0)))
-        rate_percent = int(float(rate) * 100)
-        rate_sup = to_superscript(rate_percent)
+        rate_txt = fmt_percent(rate)
         ts = r.get("ts", "")
         fee = float(r.get("fee_usdt", 0.0))
         fee_txt = f" (含手续费{fee:.2f})" if fee > 0 else ""
-        lines.append(f"{ts} {raw}  {rate_sup}/ {fx} = {usdt}{fee_txt}{_render_line_peer(r)}")
+        lines.append(f"{ts} {raw}  {rate_txt}/ {fx} = {usdt}{fee_txt}{_render_line_peer(r)}")
     lines.append("")
 
-    # 下发（前5条，保留正负）
     lines.append(f"已下发记录 ({len(send_out)}笔)")
     for r in send_out[:5]:
         ts = r.get("ts", "")
-        usdt = trunc2(float(r.get("usdt", 0.0)))  # 保留正负
+        usdt = trunc2(float(r.get("usdt", 0.0)))
         lines.append(f"{ts} {usdt}{_render_line_peer(r)}")
     lines.append("")
 
-    lines.append(f"当前费率： 入 {rin * 100:.0f}% ⇄ 出 {abs(rout) * 100:.0f}%")
+    lines.append(f"当前费率： 入 {fmt_percent(rin)} ⇄ 出 {fmt_percent(abs(rout))}")
     lines.append(f"固定汇率： 入 {fin} ⇄ 出 {fout}")
     lines.append(f"应下发：{fmt_usdt(totals['should'])}")
     lines.append(f"已下发：{fmt_usdt(totals['sent'])}")
@@ -458,26 +481,24 @@ def render_full_summary(chat_id: int) -> str:
     for r in rec_in:
         raw = r.get("raw", 0)
         fx = r.get("fx", fin)
-        rate = r.get("rate", rin)
+        rate = float(r.get("rate", rin))
         usdt = trunc2(float(r.get("usdt", 0.0)))
-        rate_percent = int(float(rate) * 100)
-        rate_sup = to_superscript(rate_percent)
+        rate_txt = fmt_percent(rate)
         ts = r.get("ts", "")
-        lines.append(f"{ts} {raw}  {rate_sup}/ {fx} = {usdt}{_render_line_peer(r)}")
+        lines.append(f"{ts} {raw}  {rate_txt}/ {fx} = {usdt}{_render_line_peer(r)}")
     lines.append("")
 
     lines.append(f"已出账 ({len(normal_out)}笔)")
     for r in normal_out:
         raw = r.get("raw", 0)
         fx = r.get("fx", fout)
-        rate = r.get("rate", rout)
+        rate = float(r.get("rate", rout))
         usdt = round2(float(r.get("usdt", 0.0)))
-        rate_percent = int(float(rate) * 100)
-        rate_sup = to_superscript(rate_percent)
+        rate_txt = fmt_percent(rate)
         ts = r.get("ts", "")
         fee = float(r.get("fee_usdt", 0.0))
         fee_txt = f" (含手续费{fee:.2f})" if fee > 0 else ""
-        lines.append(f"{ts} {raw}  {rate_sup}/ {fx} = {usdt}{fee_txt}{_render_line_peer(r)}")
+        lines.append(f"{ts} {raw}  {rate_txt}/ {fx} = {usdt}{fee_txt}{_render_line_peer(r)}")
     lines.append("")
 
     lines.append(f"已下发记录 ({len(send_out)}笔)")
@@ -488,7 +509,7 @@ def render_full_summary(chat_id: int) -> str:
     lines.append("")
 
     lines.append("━━━━━━━━━━━━━━")
-    lines.append(f"当前费率： 入 {rin * 100:.0f}% ⇄ 出 {abs(rout) * 100:.0f}%")
+    lines.append(f"当前费率： 入 {fmt_percent(rin)} ⇄ 出 {fmt_percent(abs(rout))}")
     lines.append(f"固定汇率： 入 {fin} ⇄ 出 {fout}")
     lines.append(f"出金手续费： {fee_usdt:.2f} USDT/笔")
     lines.append(f"应下发：{fmt_usdt(totals['should'])}")
@@ -534,22 +555,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "  清除数据 / 清空数据 / 清楚数据 / 清除账单 / 清空账单\n\n"
                 "⚙️ 参数设置（仅机器人管理员 / 超级管理员）：\n"
                 "  重置默认值\n"
-                "  设置入金费率 10\n"
+                "  设置入金费率 3.5\n"
                 "  设置入金汇率 153\n"
-                "  设置出金费率 2\n"
+                "  设置出金费率 2.5\n"
                 "  设置出金汇率 137\n\n"
                 "👥 机器人管理员管理（仅超级管理员）：\n"
-                "  设置管理员（回复消息）\n"
-                "  删除管理员（回复消息）\n"
+                "  （必须回复对方消息）发送：设置管理员 / 删除管理员\n"
                 "  显示管理员\n\n"
-                "📌 提示：你在群里操作入金/出金/下发时，如果是“回复某人的消息”再发指令，账单会显示对方名字前4位。"
+                "📌 提示：在群里操作入金/出金/下发时，如果是“回复某人的消息”再发指令，账单会显示对方名字前4位。"
             )
         else:
             await update.message.reply_text(
                 "👋 你好！欢迎使用财务记账机器人\n\n"
                 "• +0 可查看账单汇总\n"
                 "• 更多记录 可查看完整账单\n\n"
-                "如需记账权限，请联系超级管理员设置你为机器人管理员。"
+                "如需记账权限，请联系超级管理员（回复你的消息后发送：设置管理员）。"
             )
     else:
         await update.message.reply_text(
@@ -564,7 +584,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "  清空：清除数据 / 清空账单\n"
             "  手续费：设置出金手续费 1（0关闭）\n\n"
             "👥 仅超级管理员可用：\n"
-            "  设置管理员（回复消息）/ 删除管理员 / 显示管理员"
+            "  （必须回复对方消息）发送：设置管理员 / 删除管理员\n"
+            "  显示管理员"
         )
 
 
@@ -664,7 +685,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.startswith(("设置管理员", "删除管理员", "显示管理员")):
         admins = list_admins()
 
-        if text.startswith("显示"):
+        if text.startswith("显示管理员"):
             lines: List[str] = []
             lines.append("👥 机器人权限列表\n")
 
@@ -704,40 +725,38 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("\n".join(lines))
             return
 
+        # 设置/删除：仅超级管理员
         if not can_manage_bot_admin(user.id):
             await update.message.reply_text("🚫 只有超级管理员可以设置/删除机器人管理员。")
             return
 
-        target = None
-        if update.message.entities:
-            for entity in update.message.entities:
-                if entity.type == "text_mention":
-                    target = entity.user
-                    break
-        if not target and update.message.reply_to_message:
-            target = update.message.reply_to_message.from_user
-
+        target = resolve_target_user_by_reply(update)
         if not target:
             await update.message.reply_text(
-                "❌ 请指定要操作的用户\n"
-                "方式1：@用户名 设置管理员\n"
-                "方式2：回复用户消息 + 设置管理员"
+                "❌ Telegram 限制：无法通过 @username 设置管理员。\n\n"
+                "✅ 正确方式：\n"
+                "请【回复该用户的消息】，然后发送：\n"
+                "  设置管理员\n"
+                "或\n"
+                "  删除管理员"
             )
             return
 
-        if text.startswith("设置"):
-            add_admin(target.id)
-            await update.message.reply_text(
-                f"✅ 已将 {target.mention_html()} 设置为机器人管理员。",
-                parse_mode="HTML",
-            )
-        elif text.startswith("删除"):
-            remove_admin(target.id)
-            await update.message.reply_text(
-                f"🗑️ 已移除 {target.mention_html()} 的机器人管理员权限。",
-                parse_mode="HTML",
-            )
-        return
+        if text.startswith("设置管理员"):
+            changed = add_admin(target.id)
+            if changed:
+                await update.message.reply_text(f"✅ 已将 {target.full_name} 设置为机器人管理员。\n🆔 ID: {target.id}")
+            else:
+                await update.message.reply_text("ℹ️ 该用户已经是机器人管理员，无需重复设置。")
+            return
+
+        if text.startswith("删除管理员"):
+            changed = remove_admin(target.id)
+            if changed:
+                await update.message.reply_text(f"🗑️ 已移除 {target.full_name} 的机器人管理员权限。")
+            else:
+                await update.message.reply_text("ℹ️ 该用户不是机器人管理员。")
+            return
 
     # 以下所有操作：仅机器人管理员 / 超级管理员
     if not is_bot_admin(user.id):
@@ -806,10 +825,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = [
             f"📍【{country} 当前点位】\n",
             "📥 入金设置：",
-            f"  • 费率：{float(in_rate) * 100:.0f}% ({in_rate_src})",
+            f"  • 费率：{fmt_percent(float(in_rate))} ({in_rate_src})",
             f"  • 汇率：{in_fx} ({in_fx_src})\n",
             "📤 出金设置：",
-            f"  • 费率：{abs(float(out_rate)) * 100:.0f}% ({out_rate_src})",
+            f"  • 费率：{fmt_percent(abs(float(out_rate)))} ({out_rate_src})",
             f"  • 汇率：{out_fx} ({out_fx_src})",
             f"  • 手续费：{out_fee:.2f} USDT/笔（默认）",
         ]
@@ -818,16 +837,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ========== 重置默认值 ==========
     if text in ("重置默认值", "恢复默认值"):
+        keep_fee = float(state["defaults"]["out"].get("fee_usdt", 0.0))
         state["defaults"] = {
             "in": {"rate": 0.10, "fx": 153},
-            "out": {"rate": 0.02, "fx": 137, "fee_usdt": float(state["defaults"]["out"].get("fee_usdt", 0.0))},
+            "out": {"rate": 0.02, "fx": 137, "fee_usdt": keep_fee},
         }
         save_group_state(chat_id)
         await update.message.reply_text(
             "✅ 已重置为推荐默认值\n\n"
             "📥 入金设置：费率 10% / 汇率 153\n"
             "📤 出金设置：费率 2% / 汇率 137\n"
-            f"🧾 出金手续费：{float(state['defaults']['out'].get('fee_usdt', 0.0)):.2f} USDT/笔"
+            f"🧾 出金手续费：{keep_fee:.2f} USDT/笔"
         )
         return
 
@@ -839,19 +859,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             val = 0.0
             display_val = ""
 
-            if "设置入金费率" in text:
+            if text.startswith("设置入金费率"):
                 direction, key = "in", "rate"
                 val = float(text.replace("设置入金费率", "").strip()) / 100.0
-                display_val = f"{val * 100:.0f}%"
-            elif "设置入金汇率" in text:
+                display_val = fmt_percent(val)
+            elif text.startswith("设置入金汇率"):
                 direction, key = "in", "fx"
                 val = float(text.replace("设置入金汇率", "").strip())
                 display_val = str(val)
-            elif "设置出金费率" in text:
+            elif text.startswith("设置出金费率"):
                 direction, key = "out", "rate"
                 val = float(text.replace("设置出金费率", "").strip()) / 100.0
-                display_val = f"{val * 100:.0f}%"
-            elif "设置出金汇率" in text:
+                display_val = fmt_percent(val)
+            elif text.startswith("设置出金汇率"):
                 direction, key = "out", "fx"
                 val = float(text.replace("设置出金汇率", "").strip())
                 display_val = str(val)
@@ -865,7 +885,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ 已设置默认{dir_name}{type_name}\n📊 新值：{display_val}")
             return
         except ValueError:
-            await update.message.reply_text("❌ 格式错误，请输入有效的数字\n例如：设置入金费率 10")
+            await update.message.reply_text("❌ 格式错误，请输入有效的数字\n例如：设置入金费率 3.5")
             return
 
     # ========== 高级设置（指定国家） ==========
@@ -880,6 +900,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 val = float(match.group(4))
                 if key == "rate":
                     val /= 100.0
+
                 if scope == "默认":
                     state["defaults"].setdefault(direction, {})
                     state["defaults"][direction][key] = val
@@ -889,7 +910,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 save_group_state(chat_id)
                 type_name = "费率" if key == "rate" else "汇率"
                 dir_name = "入金" if direction == "in" else "出金"
-                display_val = f"{val * 100:.0f}%" if key == "rate" else str(val)
+                display_val = fmt_percent(val) if key == "rate" else str(val)
                 await update.message.reply_text(f"✅ 已设置 {scope} {dir_name}{type_name}\n📊 新值：{display_val}")
                 return
             except ValueError:
@@ -1000,10 +1021,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             item["peer"] = peer4
 
         push_recent(chat_id, "in", item)
-
         append_log(
             log_path(chat_id, country, dstr),
-            f"[入金] 时间:{ts} 国家:{country or '通用'} 原始:{amt} 汇率:{p['fx']} 费率:{p['rate']*100:.2f}% 结果:{usdt} 备注:{peer4}",
+            f"[入金] 时间:{ts} 国家:{country or '通用'} 原始:{amt} 汇率:{p['fx']} 费率:{p['rate']*100:.4f}% 结果:{usdt} 备注:{peer4}",
         )
         await update.message.reply_text(render_group_summary(chat_id))
         return
@@ -1036,15 +1056,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             item["peer"] = peer4
 
         push_recent(chat_id, "out", item)
-
         append_log(
             log_path(chat_id, country, dstr),
-            f"[出金] 时间:{ts} 国家:{country or '通用'} 原始:{amt} 汇率:{p['fx']} 费率:{p['rate']*100:.2f}% 基础:{base_usdt} 手续费:{fee_usdt} 合计:{usdt} 备注:{peer4}",
+            f"[出金] 时间:{ts} 国家:{country or '通用'} 原始:{amt} 汇率:{p['fx']} 费率:{p['rate']*100:.4f}% 基础:{base_usdt} 手续费:{fee_usdt} 合计:{usdt} 备注:{peer4}",
         )
         await update.message.reply_text(render_group_summary(chat_id))
         return
 
-    # ========== 下发记录（保留正负，且展示时原样显示） ==========
+    # ========== 下发记录（保留正负，展示原样） ==========
     if text.startswith("下发"):
         usdt_str = text.replace("下发", "", 1).strip()
         if not usdt_str:
@@ -1067,7 +1086,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ 格式错误，请输入有效数字，例如：下发100 或 下发-100")
             return
 
-    # 其他消息忽略
     return
 
 
