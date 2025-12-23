@@ -96,7 +96,7 @@ def load_group_state(chat_id: int) -> Dict[str, Any]:
                 {"in": {"rate": 0.0, "fx": 0.0}, "out": {"rate": 0.0, "fx": 0.0}},
             )
             state.setdefault("countries", {})
-            state.setdefault("bot_name", "东启海外支付")
+            state.setdefault("bot_name", "全球海外支付")
             state.setdefault("last_date", "")
 
             # 补齐出金手续费字段
@@ -447,7 +447,7 @@ def _render_line_peer(r: Dict[str, Any]) -> str:
 
 def render_group_summary(chat_id: int) -> str:
     state = load_group_state(chat_id)
-    bot = state.get("bot_name", "东启海外支付")
+    bot = state.get("bot_name", "全球海外支付")
     reset_time = state.get("reset_time", "00:00")
 
     totals = compute_totals(state)
@@ -486,7 +486,7 @@ def render_group_summary(chat_id: int) -> str:
         usdt = float(r.get("usdt", 0.0))
         ts = r.get("ts", "")
         fee = float(r.get("fee_usdt", 0.0))
-        fee_txt = f" (含手续费{fmt_num(fee)})" if fee > 0 else ""
+        fee_txt = f" (手续费{fmt_num(fee)})" if fee > 0 else ""
         lines.append(
             f"{ts} {fmt_num(raw)} {fmt_rate_point(rate)}/{fmt_num(fx)} = {fmt_num(usdt)}{fee_txt}{_render_line_peer(r)}"
         )
@@ -513,7 +513,7 @@ def render_group_summary(chat_id: int) -> str:
 
 def render_full_summary(chat_id: int) -> str:
     state = load_group_state(chat_id)
-    bot = state.get("bot_name", "东启海外支付")
+    bot = state.get("bot_name", "全球海外支付")
     reset_time = state.get("reset_time", "00:00")
 
     totals = compute_totals(state)
@@ -550,7 +550,7 @@ def render_full_summary(chat_id: int) -> str:
         usdt = float(r.get("usdt", 0.0))
         ts = r.get("ts", "")
         fee = float(r.get("fee_usdt", 0.0))
-        fee_txt = f" (含手续费{fmt_num(fee)})" if fee > 0 else ""
+        fee_txt = f" (手续费{fmt_num(fee)})" if fee > 0 else ""
         lines.append(
             f"{ts} {fmt_num(raw)} {fmt_rate_point(rate)}/{fmt_num(fx)} = {fmt_num(usdt)}{fee_txt}{_render_line_peer(r)}"
         )
@@ -564,7 +564,6 @@ def render_full_summary(chat_id: int) -> str:
     lines.append("")
 
     lines.append("━━━━━━━━━━━━━━")
-    lines.append(f"清空时间（北京时间）：{reset_time}（账期 24 小时）")
     lines.append(f"当前费率： 入 {fmt_rate_point(rin)} ⇄ 出 {fmt_rate_point(abs(rout))}")
     lines.append(f"固定汇率： 入 {fmt_num(fin)} ⇄ 出 {fmt_num(fout)}")
     lines.append(f"出金手续费： {fmt_num(fee_usdt)} USDT/笔")
